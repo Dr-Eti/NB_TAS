@@ -636,6 +636,5 @@ rownames(c) <- "theta"
 
 myTab4viz <- rbind.data.frame(a, b, c)
 
-
 myTab4viz
 
