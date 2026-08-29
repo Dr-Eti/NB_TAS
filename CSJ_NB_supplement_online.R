@@ -1,48 +1,31 @@
 ## Online Supplement to manuscript
 ## Submitted to Canadian J Statistics
 ##
-## 07 / 2026
+## 07 / 2026 
+## 08 / 2026 (add zero truncation)
 
 ## Input prep
 ## -- load functions for auxiliary Poisson regression        ####
-source("aux_functions/aux_Pois_fun.R")   
+source("aux_functions/aux_Pois_fun_ZT.R")   
 
 
 ## -- read data                                              ####
 mypath <- "./data"
-myData <- read.csv(paste0(mypath, "/TAS_NB_example.csv", collapse = " "), header = TRUE, row.names=1)
-
-
-target_feat <- "g_DISRUPTIONS"
-regressors_lablels <- colnames(myData)[-which(colnames(myData) %in% target_feat)]
-
-y <- myData[,target_feat, drop = FALSE]                     # target
-y <- as.matrix(y)
-n <- nrow(myData)                                           # observations
-p <- length(regressors_lablels)                             # features excluding intercept
-
-X <-  cbind(1, myData)                                      # add intercept 
-X <- as.matrix(X[,-which(colnames(X) %in% target_feat)])
-colnames(X) <- c("intercept", regressors_lablels)
-rownames(X) <- rownames(myData)
-n_regressors <- ncol(X)                                     # p + 1
-
-
-
-
-
-
-
-
+myData <- read.csv(paste0(mypath, "/CJS_NB_example_ZT.csv", collapse = " "), header = TRUE, row.names=1)
 
 
 
 ##                                                           ####
-## Neg Bin cross-section                                     ####
+## Functions declaration                                     ####
+##                                                           ####
+## A) NB MLE eqs (allows zero truncation and offset)         ####
 ## -- own NB PMF                                             ####
-## The pre-built function ?pnbinom uses a different parametrisation of the PMF. This one uses lambda and alpha
 
-dnegbin_own <-   function(x, p_lambda, p_alpha){
+## Equations in the paper: 1 (main text) & S1, S18 (Supplementary Material)
+## Note:
+## -- The pre-built function ?pnbinom uses a different parametrisation
+
+dnegbin_own <-   function(x, p_lambda, p_alpha, zerotrunc = FALSE){
   if(p_alpha == 0){
     theta_nb <- gamma_alpha <- 0
   } else {
@@ -56,38 +39,107 @@ dnegbin_own <-   function(x, p_lambda, p_alpha){
     #bin_coeff <- (gamma(x + p_alpha)/(gamma(x + 1)*gamma_alpha))              
     bin_coeff <- choose((x + p_alpha - 1), x)                                 # should be the same
     pr_x <-  bin_coeff*(a^x)*(b^p_alpha)                                      # should be the same as dnbinom(x, size = p_alpha, p = b)
-    return(lpdf = pr_x)
+    if(zerotrunc){
+      CDF_0 <- (1 / (1 + theta_nb*mu)^p_alpha)
+      pr_x <- pr_x / (1 - CDF_0)                                        
+    } 
+    return(pr_x)
   })
 }
 
 
 ## -- own CDF                                                ####
 
-## pnbinom(x, size = p_alpha, p = b)
-
-negbin_CDF <- function(x, p_lambda, p_alpha){
+negbin_CDF <- function(x, p_lambda, p_alpha, zerotrunc = FALSE){
   sum(sapply(0:x, function(k){
-    dnegbin_own(k, p_lambda = p_lambda, p_alpha = p_alpha)                     # pnbinom(x, size = p_alpha, p = b)
+    dnegbin_own(k, p_lambda = p_lambda, p_alpha = p_alpha, zerotrunc = zerotrunc)          # pnbinom(x, size = p_alpha, p = b)
   }))
 }   
 
 
 
-## -- Log likelihood                                         ####
-loglik_NB <- function(y,  p_alpha, p_lambda){
-  loglambda <- log(p_lambda)
-  loglambda[which(!is.finite(loglambda))] <- 0
+## -- Mean and variance                                      ####
+
+## Equations in the paper: S2 & S19;  S4 & S21 (Supplementary Material)
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+
+E_NB <- function(p_lambda, p_alpha, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(rate_param & (is.na(offset_feat) | length(which(is.na(offset_feat_value)))>0) ){
+    stop("Invalid arguments for rate parametrisation")
+  }
   if(p_alpha == 0){
-    theta_nb <- alpha_lgam <- alpha_log <- 0
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  mu <- p_lambda
+  if(rate_param & !is.na(offset_feat)){
+    lambda_tilde <- mu * offset_feat_value                                   # mean w/offset =  exp(x'B)*t = exp(x'B + ln t)
+    mu <- lambda_tilde 
+  }
+  if(zerotrunc){
+    CDF_0 <- (1 / (1 + p_theta*mu)^p_alpha)
+    mu <- mu / (1 - CDF_0)
+    mu[which(!is.finite(mu))] <- 0                                           # just in case
+  }
+  return(mu)
+}
+
+
+Var_NB <- function(p_lambda, p_alpha, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(rate_param & (is.na(offset_feat) | length(which(is.na(offset_feat_value)))>0) ){
+    stop("Invalid arguments for rate parametrisation")
+  }
+  if(p_alpha == 0){
+    theta_nb <- 0
   } else {
     theta_nb <- 1/p_alpha
+  }
+  dvar <- sapply(1:length(p_lambda), function(j){
+    mu <- E_NB(p_lambda[j], 
+               p_alpha, 
+               rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+    a <- 1 + theta_nb*mu
+    c <- mu * a
+    if (zerotrunc){
+      CDF_0 <- 1/a^p_alpha
+      d <- CDF_0 * mu^2
+      c - d
+    } else {
+      c
+    }
+  })
+  return(dvar)
+}
+
+
+## -- Log likelihood                                         ####
+
+## Equations in the paper: 15 (main text) & S23 (Supplementary Material)
+
+loglik_NB <- function(X_data, y_data, p_beta, p_alpha, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- alpha_lgam <- alpha_log <- 0
+  } else {
+    p_theta <- 1/p_alpha
     alpha_lgam <- lgamma(p_alpha)
     alpha_log <- log(p_alpha)
   }
-  a <- lgamma(y+p_alpha)-alpha_lgam-lgamma(y+1)
-  b <- y*loglambda+p_alpha*alpha_log
-  c <- (p_alpha+y)*log(p_lambda+p_alpha)
-  nb_loglik <- sum(a+b-c)
+  p_lambda <- linkingFun(p_beta, X_data)
+  if(rate_param & !is.na(offset_feat)){ 
+    p_lambda <- p_lambda*offset_feat_value
+  }
+  loglambda <- log(p_lambda)
+  loglambda[which(!is.finite(loglambda))] <- 0
+  a <- lgamma(y_data + p_alpha) - alpha_lgam - lgamma(y_data + 1)
+  b <- y_data*loglambda + p_alpha*alpha_log
+  c <- (p_alpha + y_data)*log(p_lambda + p_alpha)
+  nb_loglik <- sum(a + b - c)
+  if(zerotrunc){
+    CDF_0 <- (1 / (1 + p_theta*p_lambda)^p_alpha)
+    nb_loglik <- nb_loglik - sum(log(1 - CDF_0))  
+  }
   return(nb_loglik)
 }
 
@@ -96,17 +148,32 @@ loglik_NB <- function(y,  p_alpha, p_lambda){
 
 ## -- Gradient wrt beta                                      ####
 
+## Equations in the paper: S6, S36 & S37 (Supplementary material)
 ## Assumes:
-## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)
+## -- p_lambda = exp(X %*% beta_iter)
 
-gradient_NB <- function(p_lambda, p_alpha, X, y){
-  p_theta <- 1/p_alpha
+gradient_NB <- function(p_lambda, p_alpha, X, y, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  p_mu <- E_NB(p_lambda, 
+               p_alpha, 
+               rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc) 
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda <- p_lambda*offset_feat_value
+  }
   n_observ <- nrow(X)
-  if(!is.finite(p_theta)){p_theta <- 0} 
-  residue_iter <- y - p_lambda       
+  residue_iter <- y - p_lambda      
   stacked_g <- sapply(1:n_observ, function(i){                                       
-    i <- as.numeric(i)
-    temp_g_i <- (residue_iter[i] / (1 + p_theta*p_lambda[i])) 
+    #i <- as.numeric(i)
+    temp_g_i <- (residue_iter[i] / (1 + p_theta*p_lambda[i]))
+    if(zerotrunc){
+      zt_adjust_num <-  p_mu[i] 
+      zt_adjust_den <- (1 + p_theta*p_lambda[i])^(p_alpha + 1) 
+      temp_g_i <- temp_g_i - (zt_adjust_num / zt_adjust_den)
+    } 
     temp_g_i*X[i,]
   })
   if(!is.matrix(stacked_g)){ g_gradient <- sum(stacked_g)
@@ -121,20 +188,93 @@ gradient_NB <- function(p_lambda, p_alpha, X, y){
 
 ## -- Hessian wrt beta                                       ####
 
-hessian_NB <- function(p_lambda, p_alpha, X, y){
-  ## NOTE: unlike the poisson Hessian, y is an argument
-  p_theta <- 1/p_alpha
+## Equations in the paper: S7; S38 & S39 (Supplementary Material)
+## Assumes:
+## -- p_lambda = exp(X %*% beta_iter)
+
+hessian_NB <- function(p_lambda, p_alpha, X, y, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  
+  ## For debug
+  # p_lambda = lambda_iter
+  # p_alpha = p_alpha_fix
+  #X = X_data
+  #y = y_data
+  
+  
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda <- p_lambda*offset_feat_value
+  }
   n_regressors <- ncol(X)
   n_observ <- nrow(X)
+  
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  Hessian_iter <- matrix(0L,nrow = n_regressors, ncol = n_regressors)
+  ## Aternative 1
+  phi_sub <- (1 + p_theta*p_lambda)
+  H_parent <- ((1 + p_theta*y) / phi_sub^2)*p_lambda
+  if(zerotrunc){
+    phi_sub_1a <- (1 / phi_sub^(1+p_alpha))
+    phi <-  (1/phi_sub^p_alpha) 
+    H_zt_A  <- ( p_lambda*phi_sub_1a / (1 - phi) )^2
+    H_zt_B1 <- ( p_lambda*phi_sub_1a ) /  (1 - phi)
+    #H_zt_B2 <- (p_lambda^2 * (p_theta + 1) * phi_sub^(p_alpha-2)) /  (1 - phi)            # wrong equation in Grogger and Carson!
+    H_zt_B2 <- (p_lambda^2 * (p_theta + 1) * (1/phi_sub^(p_alpha+2)) ) /  (1 - phi)
+  }
   Hessian_iter <- matrix(0L,nrow = n_regressors, ncol = n_regressors)
   for(i in 1:n_observ){
     x <- X[i,]
     x <- as.numeric(x)
-    outprod_X <- (x %o% x)                                                              
-    negbin_hess_num <- (1 + p_theta*y[i])*p_lambda[i]
-    negbin_hess_den <- (1 + p_theta*p_lambda[i])^2
-    Hessian_iter <- Hessian_iter - ((negbin_hess_num/negbin_hess_den))*outprod_X     
+    outprod_X <- (x %o% x) 
+    A <- H_parent[i]
+    if(zerotrunc){
+      B <- H_zt_A[i]
+      C <- H_zt_B1[i]
+      D <- H_zt_B2[i]
+    } else {
+      B <- C <- D <- 0
+    }
+    Hessian_iter <- Hessian_iter - ( A - B + C - D)*outprod_X     
   }
+  
+  
+  ## Alternative 2: based on my paper (uses the mean)
+  #p_mu <- E_NB(p_lambda, 
+  #             p_alpha, 
+  #             rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  # for(i in 1:n_observ){
+  #   x <- X[i,]
+  #   x <- as.numeric(x)
+  #   outprod_X <- (x %o% x) 
+  #   negbin_hess_num <- (1 + p_theta*y[i])*p_lambda[i]
+  #   negbin_hess_den <- (1 + p_theta*p_lambda[i])^2
+  #   H_NB <- (negbin_hess_num / negbin_hess_den) 
+  #   if(zerotrunc){
+  #     zt_adjust_num_1 <- p_mu[i]
+  #     zt_adjust_num_2 <- zt_adjust_num_1 * (p_theta + 1) * p_lambda[i]
+  #     zt_adjust_den_1 <- (1 + p_theta*p_lambda[i])^(p_alpha + 1)
+  #     zt_adjust_den_2 <- (1 + p_theta*p_lambda[i])^(2 - p_alpha)
+  #     zt_adjust  <- ( (zt_adjust_num_1/zt_adjust_den_1) * (1 - zt_adjust_num_1/zt_adjust_den_1) ) - (zt_adjust_num_2/zt_adjust_den_2)
+  #     
+  #     ## Alternative 3: equivalent, but Grogger's notation
+  #     # temp_a <- 1 + p_theta*p_lambda[i]
+  #     # temp_b <- 1 - temp_a^(-p_alpha)
+  #     # ztrunc_adjust_H_1_num <- p_lambda[i] * temp_a^(-2*(1+p_alpha))
+  #     # ztrunc_adjust_H_1_den <- temp_b^2
+  #     # ztrunc_adjust_H_2_num <- temp_a^(-(1+p_alpha)) - (p_lambda[i]*(p_theta + 1)*temp_a^(-2+p_alpha))
+  #     # ztrunc_adjust_H_2_den <- temp_b
+  #     # zt_adjust2 <- ((ztrunc_adjust_H_2_num / ztrunc_adjust_H_2_den) - (ztrunc_adjust_H_1_num / ztrunc_adjust_H_1_den)) * p_lambda[i]
+  # 
+  #   } else {
+  #     zt_adjust  <- 0
+  #   }
+  #   Hessian_iter <- Hessian_iter - ( (negbin_hess_num / negbin_hess_den) + zt_adjust )*outprod_X     
+  # }
+  
+  
   return(Hessian_iter)
 }
 
@@ -144,24 +284,43 @@ hessian_NB <- function(p_lambda, p_alpha, X, y){
 
 
 ## -- Gradient wrt alpha                                     ####
-gradient_NB_alpha <- function(y, p_alpha, p_lambda){
+
+## Equations in the paper: 15, 22 & 23(main text); S24, S25 (Supplementary Material)
+## Assumes:
+## -- p_lambda = exp(X %*% beta_iter)* offset if rate parametrization
+
+
+gradient_NB_alpha <- function(y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
   if(!is.matrix(y)) y <- as.matrix(y)
   n_observ <- nrow(y)
-  test_1 <- which(!is.finite(p_alpha))
-  if(length(test_1)>0){p_alpha[test_1] <- 0} 
   if(p_alpha == 0){
+    p_theta <- 0
     alpha_log <-  0
     alpha_digam <- 0
   } else {
+    p_theta <- 1/p_alpha
     alpha_log <-  log(p_alpha)
     alpha_digam <-  digamma(p_alpha)
-  }  
-  a <- digamma(p_alpha + y) - alpha_digam + (alpha_log + 1)
-  b <- log(p_lambda + p_alpha)
-  c <- (p_alpha + y)/(p_lambda + p_alpha)
-  test_2 <- which(!is.finite(c))
-  if(length(test_2)>0){c[test_2] <- 0} 
-  d_dalpha <- sum(a - b - c)
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda <- p_lambda*offset_feat_value
+  }
+  ## Option 1
+  #a <- digamma(p_alpha + y) - alpha_digam + (alpha_log + 1)
+  #b <- log(p_lambda + p_alpha)
+  #c <- (p_alpha + y)/(p_lambda + p_alpha)
+  ## Option 2: highlights the "residual"
+  a <- digamma(p_alpha + y) - alpha_digam
+  b <- 1 + p_theta*p_lambda
+  c <- (y - p_lambda) / (p_alpha*b)
+  if(zerotrunc){
+    phi <- 1/b^p_alpha
+    dphi <- ( (p_lambda / (p_alpha*b) ) * phi ) - ( log(b) * phi)
+    d <- (dphi/(1 - phi))    
+  } else {
+    d <- 0
+  }
+  d_dalpha <- sum(a - log(b) - c + d)
   return(d_dalpha)
 }
 
@@ -169,140 +328,342 @@ gradient_NB_alpha <- function(y, p_alpha, p_lambda){
 
 
 ## -- Hessian wrt alpha                                      ####
-Hessian_NB_alpha <- function(y, p_alpha, p_lambda){
-  if(!is.finite(p_alpha)){p_alpha <- 0} 
-  a <- trigamma(y + p_alpha) - trigamma(p_alpha)
+## Equations in the paper: 16, 25 & 26 (main text); S26, S30 & S31 (Supplementary Material)
+## Assumes:
+## -- p_lambda = exp(X %*% beta_iter) 
+
+Hessian_NB_alpha <- function(y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- 0
+    alpha_trigam <- 0
+  } else {
+    p_theta <- 1/p_alpha
+    alpha_trigam <- trigamma(p_alpha)
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda <- p_lambda*offset_feat_value
+  }
+  a <- trigamma(y + p_alpha) - alpha_trigam
   b <- (p_lambda^2 + p_alpha*y)
   c <- (p_alpha*(p_alpha + p_lambda)^2)
-  dL2_dalpha2 <- sum( a + (b/c))
+  if(zerotrunc){ 
+    d <- 1 + p_theta*p_lambda
+    phi <- 1/d^p_alpha
+    dphi <- ( log(d) * phi) - ( (p_lambda / (p_alpha*d) ) * phi )  
+    d2phi <-  dphi^2/ phi + ( (p_theta*phi) * (p_lambda / (p_alpha*d))^2 ) 
+    e <- (dphi/(1 - phi))^2 +  (d2phi/(1 - phi))
+    
+    ## equivalent shorter version in eq. S31 Supplementary materials
+    f <- p_lambda / (p_alpha + p_lambda)
+    g_fun <-  f - log(1 + p_theta*p_lambda) 
+    dg_fun <- p_theta * f^2 
+    e_short <- (phi / (1 - phi) ) * ( (g_fun^2 / (1 - phi)) + dg_fun)
+    
+    ## for debug
+    #all.equal(e, e_short)
+  } else {
+    e <- 0
+  }
+  dL2_dalpha2 <- sum( a + (b/c) + e)
   return( dL2_dalpha2)
 }
 
 
+## -- Gradient wrt theta                                     ####
+
+## Equations in the paper: 6, 8, 24 main text; S32 & S33 Supplementary Materials 
+## Assumes:
+## -- p_lambda = exp(X %*% beta_iter) * offset
+
+gradient_NB_theta <- function(y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = offset_feat_value, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- 0
+    alpha_digam <- 0
+  } else {
+    p_theta <- 1/p_alpha
+    alpha_digam <-  digamma(p_alpha)
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
+  a <- (-1/p_theta^2)*(digamma(y + p_alpha) - alpha_digam)
+  b <- 1 + p_theta*p_lambda
+  b <- (-1/p_theta^2)*log(b)
+  c <- (y - p_lambda) / (p_theta*b)
+  if(zerotrunc){
+    phi <- 1/b^p_alpha
+    dphi <- ( (p_lambda / (p_alpha*b) ) * phi ) - ( log(b) * phi)
+    d <- (-1/p_theta^2)*(dphi/(1 - phi))    
+  } else {
+    d <- 0
+  }
+  d_dtheta <- a + b + c + d
+  return(d_dtheta)
+  
+}
+
 ## -- Hessian wrt theta                                      ####
 
-ObsInfo_NB_theta <- function(y, p_alpha, p_lambda){
-  if(!is.finite(p_alpha)){p_alpha <- 0} 
-  p_theta <- 1/p_alpha
-  a1 <- (2/p_theta^3)*(digamma(y + p_alpha) - digamma(p_alpha))
-  a2 <- (1/p_theta^4)*(trigamma(y + p_alpha ) - trigamma(p_alpha))
-  a <-  a1 - a2
+## Equations in the paper: 9, 11, 27 main text; S34 & S35 Supplementary Materials 
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+
+Hessian_NB_theta <- function(y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- 0
+    alpha_digam <- 0
+  } else {
+    p_theta <- 1/p_alpha
+    alpha_digam <- digamma(p_alpha)
+    alpha_trigam <- trigamma(p_alpha)
+  } 
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
+  a1 <- (2/p_theta^3)*(digamma(y + p_alpha) - alpha_digam)
+  a2 <- (1/p_theta^4)*(trigamma(y + p_alpha ) - alpha_trigam)
+  a <-  a1 + a2
   b1 <- 1+p_theta*p_lambda
   b2 <- 2*log(b1)
   b3 <- (p_theta*p_lambda)/b1
   b4 <- p_theta*(1+2*p_theta*p_lambda)/b1^2
   b5 <- y - p_lambda
   b <- 1/p_theta^3*( (b5 * b4) - b3 + b2 )
-  #sum(a-b)
-  sum( a + b)
+  if(zerotrunc){
+    d <- 1 + p_theta*p_lambda
+    phi <- 1/d^p_alpha
+    dphi <- ( (p_lambda / (p_alpha*d) ) * phi ) - ( log(d) * phi)
+    d2phi <-  dphi^2/ phi + ( (p_theta*phi) * (p_lambda / (p_alpha*d))^2 ) 
+    c <- (1/p_theta^4)*(dphi/(1 - phi))^2 +  (1/(1 - phi))*((1/p_theta^4)*d2phi + (2/p_theta^3)*dphi)  
+  } else {
+    c <- 0
+  }
+  d2_theta <- sum(a - b + c)
+  return(d2_theta)
 }
 
 
+## -- (zero truncated only), x-derivatives                   ####
+## Equations in the paper: S43 & S47 (Supplementary Material)
+## NOTES: 
+## -- the cross-derivatives [alpha, beta] and [beta, alpha] yield the same resul
+## -- the equivalent result in theta is -1/theta^2 * the result in alpha
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+
+xd_NB_alpha <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA){
+  ## Only relevant for the zero truncated case. For the parent specification this is just zero
+  
+  ## for debug
+  #X = X_data 
+  #y = y_data
+  #p_alpha =  chosen_alpha
+  #p_lambda = lambda_iter 
+  
+  
+  zerotrunc = TRUE
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
+  n_observ<- nrow(X)
+  stacked_g<- sapply(1:n_observ, function(i){                                       
+    i <- as.numeric(i)
+    d <- 1 + p_theta*p_lambda[i]
+    phi <- 1/d^p_alpha
+    dphi <- ( (p_lambda[i] / (p_alpha*d) ) * phi ) - ( log(d) * phi)
+    f <- p_lambda[i] / (p_alpha + p_lambda[i])
+    g_fun <-  f - log(1 + p_theta*p_lambda[i]) 
+    dg_fun <- p_theta * f^2 
+    a <- (p_lambda[i]*y[i])/(p_alpha*(p_alpha + p_lambda[i])^2)
+    b <- dg_fun
+    c <- (p_lambda[i]/(p_alpha + p_lambda[i])) * (phi/(1 - phi)) * ( (p_lambda[i]/(p_alpha*(p_alpha + p_lambda[i]))) + dphi / (1 - phi) + g_fun )
+    temp_g_i  <- a - b - c
+    p_alpha*temp_g_i*X[i,]
+  })
+  if(!is.matrix(stacked_g)){ xd_beta_alpha <- sum(stacked_g)
+  } else {xd_beta_alpha <- as.matrix(apply(stacked_g,1,sum)) }
+  return( xd_beta_alpha )
+}
+
+
+
+
+
+
+## B) Fitting, iterative                                     ####
 ## -- Half-stepping                                          ####
-myHalfStepping_NB <- function(Xnr, ynr, beta_iter, Hessian_iter, g_gradient, p_alpha_fix){
+myHalfStepping_NB <- function(X_data, y_data, beta_iter, Hessian_iter, g_gradient, p_alpha_fix, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
   accept_candidate <- FALSE
   converge_flag <- FALSE
-  max_iter_halfstep <- 1000
-  lambda_accepted <- linkingFun(beta_iter, Xnr)
-  loglik_acceptd <- loglik_NB(ynr, p_lambda = lambda_accepted, p_alpha = p_alpha_fix)
-  lambda_accepted <- linkingFun(beta_iter, Xnr)
+  max_iter_halfstep <- 100
+  loglik_acceptd <- loglik_NB(X_data, 
+                              y_data, 
+                              p_beta = beta_iter, 
+                              p_alpha = p_alpha_fix,
+                              rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+  )
   iter_halfstep <- 0
   stepsize <- 1
   target_iter <- qr.solve(Hessian_iter, g_gradient, tol = 1e-18)            
   while(!accept_candidate & (iter_halfstep < max_iter_halfstep)){
     temp_delta <- beta_iter - stepsize*target_iter
-    lambda_iter <- linkingFun(temp_delta, Xnr)  
-    iter_halfstep  <- iter_halfstep + 1
-    loglik_iter <- loglik_NB(ynr, p_lambda = lambda_iter, p_alpha = p_alpha_fix)
+    loglik_iter <- loglik_NB(X_data, 
+                             y_data, 
+                             p_beta = temp_delta, 
+                             p_alpha = p_alpha_fix,
+                             rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+    )
     criterion_half_stepping <-  loglik_iter > loglik_acceptd
-    if(!criterion_half_stepping){ stepsize <- stepsize/2 } else { 
+    if(!criterion_half_stepping){ 
+      stepsize <- stepsize/2 
+      iter_halfstep  <- iter_halfstep + 1
+    } else { 
       accept_candidate <- TRUE 
-      target_iter <- stepsize*target_iter
+      target_iter <- stepsize*target_iter                                        
+      if(iter_halfstep < max_iter_halfstep) {converge_flag <- TRUE}
     }
   } 
-  if(iter_halfstep < max_iter_halfstep) converge_flag <- TRUE
-  list(target_iter = target_iter, temp_delta = temp_delta, stepsize = stepsize,
-       n_iter = iter_halfstep, converge_flag = converge_flag)
+  list(target_iter = target_iter, temp_delta = temp_delta, stepsize = stepsize, converge_flag = converge_flag)
 }
-  
-  
-  
-  
-  
-  
+
+
+
+
+
+
 
 
 ## -- Newton-Raphson, wrt Beta                               ####
-NR_MLE_NB <- function(Xnr, ynr, p_alpha_fix, iter_max = 200, halfstep = TRUE){
-  if(!is.matrix(Xnr)){Xnr <- as.matrix(Xnr)}
-  if(!is.matrix(ynr)){ynr <- as.matrix(ynr)}
-  n_regressors <- ncol(Xnr)
-  n_observ <- nrow(Xnr)
-  beta_iter <- matrix(0, nrow=n_regressors, ncol = 1)
-  rownames(beta_iter) <- colnames(Xnr)
-  colnames(beta_iter) <- "estimate"
-  ln_target <- as.matrix(log(abs(ynr)))
-  ln_target[which(!is.finite(ln_target))]<-0                       
-  beta_iter[1] <- mean(ln_target)                                
+NR_MLE_NB <- function(X_data, y_data, p_alpha_fix, p_beta_init, iter_max = 100, halfstep = TRUE, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE, BHHH = FALSE){
+  
+  ## FOR DEBUG 
+  iter_max = 100
+  halfstep = FALSE
+  p_alpha_fix = alpha_iter
+  p_beta_init = temp_beta
+  # if(!zerotrunc){
+  #   beta_iter <- p_beta_init
+  # } else {
+  #   ## From my notes to early version: it seems that initializing w Poisson coeff messes up zero truncated Neg BIn
+  #   beta_iter <- matrix(0, nrow = n_regressors, ncol = 1)
+  #   ln_target <- log(abs(y_data))
+  #   ln_target[which(!is.finite(ln_target))]<-0                                 # in case the target variable takes value 0
+  #   #beta_iter[1] <- mean(ln_target)                                           # initialisation from -- thread: https://www2.stat.duke.edu/courses/Spring21/sta440.001/slides/glm-2.html#10
+  #   beta_iter[1] <- mean(y_data)                                               # APPARENTLY THIS IS NEEDED FOR NEG BIN ZERO TRUNCATED
+  # }
+  
+  n_regressors <- ncol(X_data)
+  beta_iter <- p_beta_init
   iter_count <- 0
-  tol <- rep(1e-6, n_regressors)
+  GG_count <- 0
+  #tol <- rep(1e-6, n_regressors)
+  tol <- 1e-6
   iter_stop <- FALSE
   hessian_is_singular <- FALSE
+  lambda_iter <- linkingFun(beta_iter, X_data)
+  list_grad <- list()
   while(iter_count <= iter_max & !iter_stop){
     iter_count <- iter_count + 1
-    lambda_iter <- linkingFun(beta_iter, Xnr)   
-    grad <- gradient_NB(p_lambda = lambda_iter, 
+    grad <- gradient_NB(p_lambda = lambda_iter,
                         p_alpha = p_alpha_fix, 
-                        X = Xnr, 
-                        y = ynr)           
+                        X = X_data, 
+                        y = y_data,
+                        rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+    )           
     g_gradient <- grad$gradient
-    Hessian_iter <- hessian_NB(p_lambda = lambda_iter, 
+    
+    ## for debug: track gradient - is it going to zero?
+    list_grad[[iter_count]] <- g_gradient
+    
+    Hessian_iter <- hessian_NB(p_lambda = lambda_iter,
                                p_alpha = p_alpha_fix, 
-                               X = Xnr, 
-                               y = ynr)        
+                               X = X_data, 
+                               y = y_data,
+                               rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+    )        
+    
+    ## Warning: Zero truncation tends to produce an Hessian with all positive elements even if the equation is correct
+    ## -- see my post https://stats.stackexchange.com/q/676952/513606
+    ## As an alternative to the Hessian I consider: BHHH estimator (Outer Product of Gradients)
+    ## -- background: see Greene p.561-562 eq.14-17 vs 14-18 and p.1140
+    ## -- for a clearer version: Long (1997) page 56
+    if(BHHH & zerotrunc & (sum(sign(Hessian_iter)) >= -1*n_regressors^2) ){
+      GG_count <- GG_count + 1
+      stacked_g <-  grad$stacked_g
+      if(length(is.na(nrow(stacked_g)))>0){
+        ## business as usual
+        G <- t(stacked_g)
+      } else {
+        G <- as.matrix(stacked_g)                                                 ## we are dealing with odd case in which we are dealing with 1 feature
+      }
+      GG <- t(G) %*% G
+      ## CHECK: equivalent to summing the outer products of gradients
+      # outer_grad <- lapply(1:ncol(stacked_g), function(j){
+      #   x <- as.vector(stacked_g[,j])
+      #   outprod_X  <- outer(x,x)
+      # })
+      # GG_outgrad <- Reduce("+",outer_grad)                                    # https://stackoverflow.com/questions/11641701/sum-a-list-of-matrices
+      # all.equal(unname(GG), GG_outgrad)
+      Hessian_iter <- -1*GG                                                     # based on Long p.57
+    }
     inv_test <- try(qr.solve(Hessian_iter, g_gradient), silent = TRUE)
     if(inherits(inv_test, "try-error")){
       hessian_is_singular <- TRUE
       iter_stop <- TRUE } 
     if(!hessian_is_singular){
       if(halfstep){
-        HalfStep_proc <- myHalfStepping_NB(Xnr,
-                                           ynr,
+        HalfStep_proc <- myHalfStepping_NB(X_data,
+                                           y_data,
                                            beta_iter, 
                                            Hessian_iter, 
                                            g_gradient,
-                                           p_alpha_fix)
+                                           p_alpha_fix,
+                                           rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
         target_iter <- HalfStep_proc$target_iter
         temp_delta <-  HalfStep_proc$temp_delta
       } else {
-        target_iter <- qr.solve(Hessian_iter, g_gradient)
+        target_iter <- qr.solve(Hessian_iter, g_gradient, tol = 1e-18)
         temp_delta <- beta_iter - target_iter
       }
     } else { warning("Hessian is singular")
       target_iter <- 0 
     }
     if(length(which(sqrt((target_iter)^2) < tol)) < n_regressors){
-      beta_iter <- temp_delta } else {iter_stop <- TRUE}
+      beta_iter <- temp_delta 
+      lambda_iter <- linkingFun(beta_iter, X_data)
+    } else {
+      iter_stop <- TRUE
+    }
+    mean_iter <- E_NB(p_lambda = lambda_iter, 
+                      p_alpha = p_alpha_fix, 
+                      rate_param = rate_param, 
+                      offset_feat = offset_feat,
+                      offset_feat_value = offset_feat_value,
+                      zerotrunc = zerotrunc)
   }
-  return(list(coef_est = beta_iter, predict_y = lambda_iter, 
-              Hessian = Hessian_iter, iter = iter_count  ))
+  return(list(coef_est = beta_iter, lambda = lambda_iter, predict_y = mean_iter, 
+              Hessian = Hessian_iter, iter = iter_count, track_gradient = g_gradient, BHHH_instead_times = GG_count  ))
 }
 
 
 
 
 ## -- Newton-Raphson, wrt alpha                              ####
-NR_MLE_NB_alpha <- function(Xnr, ynr, p_alpha_init, p_beta_fix, iter_max = 100){
+NR_MLE_NB_alpha <- function(X_data, y_data, p_alpha_init, p_beta_fix, iter_max = 100, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
   
-  ## NOTE:
-  ## For my initial data, which wouldn't converge I had to tweak max iter = 8 initally and then 23 when called recursively in the alternating procedure to replicate glm.nb
-  
-  if(!is.matrix(Xnr)){Xnr <- as.matrix(Xnr)}
-  if(!is.matrix(ynr)){ynr <- as.matrix(ynr)}
-  n_regressors <- ncol(Xnr)
-  n_observ <- nrow(Xnr)
-  p_lambda_0 <- linkingFun(p_beta_fix, Xnr)        # call own link function
-  p_alpha_0 <- p_alpha_init                        # initial guess on alpha, to be provided externally (for flexi e.g. could be Hilbe's on first pass) 
+  p_lambda_0 <- linkingFun(p_beta_fix, X_data)                                  # lambda = exp(x' beta)
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_0 <- p_lambda_0*offset_feat_value
+  } 
+  p_alpha_0 <- p_alpha_init                                                     # initial guess on alpha 
   iter_count <- 0
   tol <- 1e-6
   iter_stop <- FALSE
@@ -313,13 +674,16 @@ NR_MLE_NB_alpha <- function(Xnr, ynr, p_alpha_init, p_beta_fix, iter_max = 100){
       p_alpha_iter <-  p_alpha_0
       p_lambda_iter <- p_lambda_0
     } 
-    g_gradient <-  gradient_NB_alpha(y = ynr,
+    
+    g_gradient <-  gradient_NB_alpha(y = y_data,
                                      p_alpha = p_alpha_iter, 
-                                     p_lambda = p_lambda_iter
+                                     p_lambda = p_lambda_iter,
+                                     zerotrunc = zerotrunc
     )           
-    Hessian_iter <- Hessian_NB_alpha(y = ynr,
+    Hessian_iter <- Hessian_NB_alpha(y = y_data,
                                      p_alpha = p_alpha_iter, 
-                                     p_lambda = p_lambda_iter
+                                     p_lambda = p_lambda_iter,
+                                     zerotrunc = zerotrunc
     )                 
     inv_test <- !is.finite(g_gradient/Hessian_iter)                              # dealing with scalars now...
     if(inv_test){
@@ -342,129 +706,138 @@ NR_MLE_NB_alpha <- function(Xnr, ynr, p_alpha_init, p_beta_fix, iter_max = 100){
 
 
 
-## -- Alternating fitting procedure                          ####
-NegBReg_altern <- function(myData, target_feat =  target_feat){
-  regressors_lablels <- colnames(myData)[-which(colnames(myData)==target_feat)] 
-  y <- as.matrix(myData[,target_feat, drop = FALSE])        
-  X <- cbind(1,as.matrix(myData[,regressors_lablels]))
-  colnames(X) <- c("intercept",regressors_lablels)
-  n_regressors <- ncol(X) 
-  n_observ <- nrow(X)
-  degrOfFreed <- n_observ - n_regressors                  
-  my_Pois_NR <- NR_MLE(Xnr = X, ynr = y)
-  temp_lambda <- my_Pois_NR$predict_y                 
-  temp_beta <- my_Pois_NR$coef_est        
-  temp_alpha <- n_observ/sum(((y/temp_lambda)-1)^2)
-  alpha_1 <- NR_MLE_NB_alpha(Xnr = X, ynr = y, p_alpha_init = temp_alpha, p_beta_fix = temp_beta)
-  if(alpha_1$p_alpha < 0){ chosen_alpha <- 0} else { chosen_alpha <- alpha_1$p_alpha }
-  alpha_iter_lst  <- list()
-  max_iter3 <- big_alpha <- 100 
-  tol_gap3 <- 1e-6
-  gap3 <- 1                                                               
-  hessian_is_singular <- FALSE
-  d1 <- sqrt(2*max(1,degrOfFreed))                                                                                       
-  d2 <- 1
-  Lm <- loglik_NB(y = y, p_alpha = chosen_alpha, p_lambda = temp_lambda)
-  Lm0 <- Lm + 2*d1                                                                             
-  stopping_criterion <- (abs(Lm0 - Lm)/d1 + abs(gap3)/d2)        # as in MASS::glm.nb                                    
-  tol_stop <- 1e-4
-  iter_count3 <- 1
-  alpha_iter_lst[[iter_count3]] <- chosen_alpha 
-  while ((iter_count3 < max_iter3) && (abs(gap3) > tol_gap3) && (stopping_criterion > tol_stop )) {
-    alpha_iter <- as.numeric(alpha_iter_lst[[iter_count3]])                                        
-    negbin_fit_iter <- NR_MLE_NB(Xnr = X, ynr = y, p_alpha_fix = alpha_iter)
-    lambda_iter <- negbin_fit_iter$predict_y           
-    beta_iter <- negbin_fit_iter$coef_est
-    temp_alpha <- n_observ/sum(((y/lambda_iter)-1)^2)
-    alpha_refined <- NR_MLE_NB_alpha(Xnr = X, ynr = y, p_alpha_init = temp_alpha, p_beta_fix = beta_iter)
-    if(alpha_refined$p_alpha < 0){ chosen_alpha <- 0} else { chosen_alpha <- alpha_refined$p_alpha }
-    gap3 <- chosen_alpha - alpha_iter
-    Lm0 <- Lm
-    Lm <-  loglik_NB(y = y, p_alpha = chosen_alpha, p_lambda = lambda_iter)
-    stopping_criterion <- (abs(Lm0 - Lm)/d1 + abs(gap3)/d2) 
-    iter_count3 <- iter_count3 + 1
-    alpha_iter_lst[[iter_count3]] <- chosen_alpha 
+## C) Expected (Fisher) Information:                         ####
+## -- beta, beta                                             ####
+
+## Equation S8 (non truncated) & S41 (truncated) - Supplementary materials
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+
+FI_Beta <- function(p_lambda, p_alpha, X, y, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  
+  ## DEBUG
+  p_lambda = linkingFun(beta_iter, X_data)   ## For ZT Eq. S41
+  p_alpha = chosen_alpha
+  X = X_data 
+  y = y_data
+  
+  
+  
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda <- p_lambda*offset_feat_value
   }
-  return(list(p_alpha_MLE=chosen_alpha, p_lambda_MLE=lambda_iter, p_beta_MLE=beta_iter, log_likelihood=Lm, n_iter=iter_count3 ))
-}
-
-
-## -- Fisher Info matrix elements: wrt beta                  ####
-
-FI_Beta <- function(p_lambda, p_alpha, X, y){
-  p_theta <- 1/p_alpha
   n_regressors <- ncol(X)
   n_observ <- nrow(X)
-  FI_Beta_iter <- matrix(0L,nrow = n_regressors, ncol = n_regressors)
+  
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  E_Hessian_iter <- matrix(0L,nrow = n_regressors, ncol = n_regressors)
+  phi_sub <- (1 + p_theta*p_lambda)
+  E_H_parent_noZT <- (p_lambda / phi_sub)                                             # see Eq. S8
+  if(zerotrunc){
+    phi_sub_1a <- (1 / phi_sub^(1+p_alpha))
+    phi <-  (1/phi_sub^p_alpha) 
+    H_zt_A  <- ( p_lambda*phi_sub_1a / (1 - phi) )^2
+    H_zt_B1 <- ( p_lambda*phi_sub_1a ) /  (1 - phi)
+    #H_zt_B2 <- (p_lambda^2 * (p_theta + 1) * phi_sub^(p_alpha-2)) /  (1 - phi)       # wrong equation in Grogger and Carson!
+    H_zt_B2 <- (p_lambda^2 * (p_theta + 1) * (1/phi_sub^(p_alpha+2)) ) /  (1 - phi)
+  }
   for(i in 1:n_observ){
     x <- X[i,]
     x <- as.numeric(x)
-    outprod_X <- (x %o% x)                                                              
-    FI_Beta_num <- p_lambda[i]
-    FI_Beta_den <- 1 + p_theta*p_lambda[i]
-    FI_Beta_iter <- FI_Beta_iter - ((FI_Beta_num/FI_Beta_den))*outprod_X     
-  }
-  FI_Beta_iter <- -1*FI_Beta_iter
-  return(FI_Beta_iter)
-}
-
-
-
-## -- Scoring wrt Beta                                       ####
-SCOR_MLE_NB <- function(Xnr, ynr, p_alpha_fix, iter_max = 200, halfstep = TRUE){
-  if(!is.matrix(Xnr)){Xnr <- as.matrix(Xnr)}
-  if(!is.matrix(ynr)){ynr <- as.matrix(ynr)}
-  n_regressors <- ncol(Xnr)
-  n_observ <- nrow(Xnr)
-  beta_iter <- matrix(0, nrow=n_regressors, ncol = 1)
-  rownames(beta_iter) <- colnames(Xnr)
-  colnames(beta_iter) <- "estimate"
-  ln_target <- as.matrix(log(abs(ynr)))
-  ln_target[which(!is.finite(ln_target))]<-0                       
-  beta_iter[1] <- mean(ln_target)                                
-  iter_count <- 0
-  tol <- rep(1e-6, n_regressors)
-  iter_stop <- FALSE
-  FI_is_singular <- FALSE
-  while(iter_count <= iter_max & !iter_stop){
-    iter_count <- iter_count + 1
-    lambda_iter <- linkingFun(beta_iter, Xnr)   
-    grad <- gradient_NB(p_lambda = lambda_iter, 
-                        p_alpha = p_alpha_fix, 
-                        X = Xnr, y = ynr)           
-    g_gradient <- grad$gradient
-    FI_iter <- -1*FI_Beta(p_lambda = lambda_iter, p_alpha = p_alpha_fix, X = Xnr, y = ynr)        
-    inv_test <- try(qr.solve(FI_iter, g_gradient), silent = TRUE)
-    if(inherits(inv_test, "try-error")){
-      FI_is_singular <- TRUE
-      iter_stop <- TRUE 
-    } 
-    if(!FI_is_singular){
-      if(halfstep){
-        HalfStep_proc <- myHalfStepping_NB(Xnr,  ynr, beta_iter, FI_iter, g_gradient, p_alpha_fix)
-        target_iter <- HalfStep_proc$target_iter
-        temp_delta <-  HalfStep_proc$temp_delta
-      } else {
-        target_iter <- qr.solve(FI_iter, g_gradient, tol = 1e-18)
-        temp_delta <- beta_iter - target_iter
-      }
-    } else { warning("Hessian is singular")
-      target_iter <- 0 
+    outprod_X <- (x %o% x) 
+    A <- E_H_parent_noZT[i] 
+    if(zerotrunc){
+      A <- A/(1 - phi[i])                                                               # due to ZT mean
+      B <- H_zt_A[i]
+      C <- H_zt_B1[i]
+      D <- H_zt_B2[i]
+    } else {
+      B <- C <- D <- 0
     }
-    if(length(which(sqrt((target_iter)^2) < tol)) < n_regressors){
-      beta_iter <- temp_delta } else {iter_stop <- TRUE}
+    E_Hessian_iter <- E_Hessian_iter - ( A - B + C - D)*outprod_X     
   }
-  return(list(coef_est = beta_iter, predict_y = lambda_iter, 
-              Hessian = FI_iter, iter = iter_count  ))
+  minus_E_Hessian_iter <- -1*E_Hessian_iter
+  return(minus_E_Hessian_iter)
+  
+  
+  
+  
+  
+  ## OLD VERSION GENERATING MIXED SINGS
+  
+  # if(p_alpha == 0){
+  #   p_theta <- 0
+  # } else {
+  #   p_theta <- 1/p_alpha
+  # }
+  # if(rate_param & !is.na(offset_feat)){
+  #   p_lambda_offset <- p_lambda*offset_feat_value                             
+  #   p_lambda <- p_lambda_offset
+  # }
+  # n_regressors <- ncol(X)
+  # n_observ <- nrow(X)
+  # FI_Beta_iter <- matrix(0L,nrow = n_regressors, ncol = n_regressors)
+  # for(i in 1:n_observ){
+  #   x <- X[i,]
+  #   x <- as.numeric(x)
+  #   outprod_X <- (x %o% x)   
+  #   if(zerotrunc){
+  #     a <- (1 + p_theta*p_lambda[i])
+  #     phi <- 1/a^p_alpha
+  #     # b <- (1 + p_theta*E_NB(p_lambda = p_lambda[i], 
+  #     #                        p_alpha = p_alpha, 
+  #     #                        rate_param = rate_param,
+  #     #                        offset_feat = offset_feat,
+  #     #                        offset_feat_value = offset_feat_value,
+  #     #                        zerotrunc = zerotrunc)) / a^2
+  #     
+  #     
+  #     ## for debug 
+  #     b <- (1 + p_theta*y[i])/a^2
+  #           
+  #     
+  #     c <- ( p_lambda[i]*(1/a^(2*(1+p_alpha))) )/ (1-phi)^2
+  #     d <- ( 1/(a^(1+p_alpha)) - p_lambda[i]*(1+p_theta)*(1/a^(2+p_alpha)) ) / phi 
+  #     
+  #     # for debug
+  #     FI_Beta_arg <- p_lambda[i] * (-1) * (b - c  + d)
+  # 
+  #     #FI_Beta_arg <- p_lambda[i] * (b - c  + d)
+  #   } else {
+  #     ## Equation S8 in supplementary materials
+  #     FI_Beta_num <- p_lambda[i]
+  #     FI_Beta_den <- 1 + p_theta*p_lambda[i]
+  #     FI_Beta_arg <- (FI_Beta_num/FI_Beta_den)
+  #   }
+  #   FI_Beta_iter <- FI_Beta_iter - (FI_Beta_arg)*outprod_X     
+  # }
+  # return(FI_Beta_iter)
+  
+  
 }
 
 
-##                                                           ####
-## Fisher Info: wrt alpha                                    ####
 
-## -- info fun with approximation for Expected Gamma         ####
 
-FI_alpha <- function(p_lambda, p_alpha, X, M =  20){
+## -- alpha, alpha                                           ####
+
+## Equation 17, 18 Main text (non truncated); 
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+## -- arbitrary upper bound M
+## Notes:
+## -- For now zero truncation can be deduced from Eq.S26 and S31 (second derivative) in the supplementary materials.  
+## -- Theta must call this function with zerotrunc = FALSE
+
+FI_alpha <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = zerotrunc){
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
   fi_a2 <- sapply(1:length(p_lambda), function(i){
     x_i <- X[i,]
     p_lambda_i <- p_lambda[i]
@@ -474,78 +847,438 @@ FI_alpha <- function(p_lambda, p_alpha, X, M =  20){
     })
     sum(fi_a1) - (p_lambda_i/(p_alpha*(p_alpha + p_lambda_i)))
   })
-  sum(fi_a2)
+  if(zerotrunc){
+    ## Same "addon" as in second derivative function
+    ## Here i use the shorter version in eq. S31 Supplementary materials
+    if(p_alpha == 0){
+      p_theta = 0
+    } else {
+      p_theta <- 1/p_alpha
+    }
+    d <- 1 + p_theta*p_lambda
+    phi <- 1/d^p_alpha
+    f <- p_lambda / (p_alpha + p_lambda)
+    g_fun <-  f - log(1 + p_theta*p_lambda) 
+    dg_fun <- p_theta * f^2 
+    e_short <- (phi / (1 - phi) ) * ( (g_fun^2 / (1 - phi)) + dg_fun)
+    e <- sum(e_short)
+  } else {
+    e <- 0
+  }
+  sum(fi_a2) - e
 }
 
 
-## -- full alternating procedure                             ####
-test_NB <- NegBReg_altern(myData = myData, 
-              target_feat =  target_feat)
 
-## -- Variance for beta                                      ####
-Info_NB <- FI_Beta(p_lambda = linkingFun(test_NB$p_beta_MLE, X),
-                   p_alpha = test_NB$p_alpha_MLE, 
-                   X = X, y = y)
-vcov_NB <- qr.solve(Info_NB, tol = 1e-18)
+## -- theta, theta                                           ####
 
-## -- variance for alpha                                     ####
-p_lambda <- test_NB$p_lambda_MLE
-p_alpha <- test_NB$p_alpha_MLE
-est_FI_alpha <- FI_alpha(p_lambda, p_alpha, X, M = 50)
-var_alpha_NB <- 1/est_FI_alpha
+## Equation 20 and 21 (main text); S45 (Supplementary materials): 
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+
+FI_theta <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
+  fi_t2 <- sapply(1:length(p_lambda), function(i){
+    x_i <- X[i,]
+    p_lambda_i <- p_lambda[i]
+    fi_t1 <-  sapply(0:M, function(j){
+      nb_CDF_j <- negbin_CDF(j, p_lambda = p_lambda_i, p_alpha)
+      (1-nb_CDF_j )/(j+p_alpha)
+    })
+    - sum(fi_t1) + log(1+p_theta*p_lambda_i)
+  })
+  ##Check main paper: 2/(p_theta^3) * sum(fi_t2)  should be close to 0
+  a <- 2/(p_theta^3) * sum(fi_t2)
+  b <- 1/(p_theta^4)*FI_alpha(p_lambda, 
+                              p_alpha, 
+                              X, 
+                              M =  M, 
+                              rate_param = rate_param, 
+                              offset_feat = offset_feat,
+                              zerotrunc = FALSE)                                ## KEEP IT SET TO FALSE IN THIS CALL
+  if(zerotrunc){
+    d <- 1 + p_theta*p_lambda
+    phi <- 1/d^p_alpha
+    dphi <- ( (p_lambda / (p_alpha*d) ) * phi ) - ( log(d) * phi)
+    d2phi <-  dphi^2/ phi + ( (p_theta*phi) * (p_lambda / (p_alpha*d))^2 ) 
+    e <- (dphi/(1 - phi))^2 +  (d2phi/(1 - phi))
+    c1 <- 1/(p_theta^4)*(dphi / (1 - phi))^2
+    c2 <- 1/(1 - phi)*( 1/(p_theta^4)*d2phi + 2/(p_theta^3)*dphi )
+    c <- c1 + c2
+    FI_theta_out <- a + b - sum(c)
+  } else {
+    FI_theta_out <- a + b
+    c <- NA
+  }
+  
+  return(list(FI_theta_out = FI_theta_out,
+              dLLdalpha_check = a, 
+              Lawless = b,
+              ZT_term = sum(c)))
+}
 
 
+## -- beta, alpha or theta (= alpha or theta, beta): zero truncated only       ####
 
-## -- Observed info                                          ####
-Info_NB_obs <- -1*hessian_NB(p_lambda = test_NB$p_lambda_MLE, p_alpha = test_NB$p_alpha_MLE, X = X, y = y)
-vcov_NB_obs <-  qr.solve(Info_NB_obs, tol = 1e-18)
-SE_model_NB_obs <- sqrt(diag(vcov_NB_obs))                                      
+## Equation S44 Supplementary Materials
+## Assumes:
+## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
+## Note:
+## -- Only relevant for the zero truncated case. For the parent specification this is just zero
+## -- the cross-derivatives [alpha, beta] and [beta, alpha] yield the same result
 
-Info_NB_obs_alpha <- -1*Hessian_NB_alpha(y=y, p_alpha = test_NB$p_alpha_MLE, p_lambda = test_NB$p_lambda_MLE)
-var_NB_obs_alpha <- 1/Info_NB_obs_alpha
-SE_mode_NB_obs_alpha <- sqrt(var_NB_obs_alpha)
+FI_x_alpha <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA){
+  
+  ## Similar to xd_NB_alpha except for the use of the mean function and sign (expectation of minus second derivative)
+  
+  zerotrunc = TRUE
+  if(p_alpha == 0){
+    p_theta <- 0
+  } else {
+    p_theta <- 1/p_alpha
+  }
+  if(rate_param & !is.na(offset_feat)){
+    p_lambda_offset <- p_lambda*offset_feat_value                             
+    p_lambda <- p_lambda_offset
+  }
+  n_observ<- nrow(X)
+  stacked_g<- sapply(1:n_observ, function(i){                                       
+    i <- as.numeric(i)
+    d <- 1 + p_theta*p_lambda[i]
+    phi <- 1/d^p_alpha
+    dphi <- ( (p_lambda[i] / (p_alpha*d) ) * phi ) - ( log(d) * phi)
+    f <- p_lambda[i] / (p_alpha + p_lambda[i])
+    g_fun <-  f - log(1 + p_theta*p_lambda[i]) 
+    dg_fun <- p_theta * f^2 
+    y_mean_i <- E_NB(p_lambda = p_lambda[i], 
+                     p_alpha = p_alpha, 
+                     rate_param = rate_param, 
+                     offset_feat = offset_feat,
+                     offset_feat_value = offset_feat_value,
+                     zerotrunc = zerotrunc)
+    a <- (p_lambda[i]*y_mean_i)/(p_alpha*(p_alpha + p_lambda[i])^2)
+    b <- dg_fun
+    c <- (p_lambda[i]/(p_alpha + p_lambda[i])) * (phi/(1 - phi)) * ( (p_lambda[i]/(p_alpha*(p_alpha + p_lambda[i]))) + (dphi / (1 - phi)) + g_fun )
+    temp_g_i  <- (a - b - c)
+    -1*p_alpha*temp_g_i*X[i,]
+  })
+  if(!is.matrix(stacked_g)){
+    xd_beta_alpha <- sum(stacked_g)
+  } else {
+    xd_beta_alpha <- as.matrix(apply(stacked_g,1,sum)) 
+  }
+  return( xd_beta_alpha )
+}
 
-## -- SE expected vs observed info                           ####
-SE_model_NB_expected <- sqrt(diag(vcov_NB))
-SE_model_NB_expected_alpha <- sqrt(var_alpha_NB)
 
+FI_x_theta <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA){
+  -1*(p_alpha^2)*FI_x_alpha(X, y, p_alpha, p_lambda, 
+                            rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+}
 
-
+## D) MAIN - Alternating fitting procedure                   ####
+NegBReg_altern <- function(myData, target_feat =  target_feat, rate_param = FALSE, offset_feat = NA, zerotrunc = FALSE){
+  
+  ## 0)Initialise with "one-off" Poisson regression model (self-contained)      ####
+  my_Pois_NR <- NR_MLE(myData, target_feat,  
+                       #rate_param = rate_param, offset_feat = offset_feat, zerotrunc = zerotrunc, halfstepping = TRUE)
+                       rate_param = rate_param, offset_feat = offset_feat, zerotrunc = FALSE, halfstepping = TRUE)
+  temp_mean <- my_Pois_NR$predict_y                 
+  temp_lambda <- my_Pois_NR$lambda
+  temp_beta <- my_Pois_NR$coef_est        
+  
+  ## Test vs pre-built, rate parametrization case
+  # obj_pois <- glm(g_DISRUPTIONS ~ b_IS_BIO + g_CENTRES + g_SUBJECTS,
+  #     family = "poisson",
+  #     data = myData,
+  #     offset = log(d_TIME_offset))
+  # obj_pois$coefficients 
+  # my_Pois_NR$coef_est
+  
+  
+  ## 1) Alpha, initial                                                          ####
+  if(rate_param & !is.na(offset_feat)){
+    col_to_remove <- c(which(colnames(myData)==offset_feat),which(colnames(myData)==target_feat))
+    regressors_lablels <- colnames(myData)[-col_to_remove]
+    offset_feat_value <- as.matrix(myData[, offset_feat])
+  } else {
+    col_to_remove <-which(colnames(myData)==target_feat)
+    regressors_lablels <- colnames(myData)[-col_to_remove]
+    offset_feat_value <- NA
+  }
+  y_data <- as.matrix(myData[,target_feat, drop = FALSE])           
+  if(length(regressors_lablels) == 0){                                   ## are we working with the intercept only?
+    X_data <-  cbind(1, myData)                                          ## no regressors besides the intercept (to be added)
+    X_data <- as.matrix(X_data[,-(1+col_to_remove), drop = FALSE])       ## fixed Jan 2026 - created an issue in stepwise
+    colnames(X_data) <- "intercept"
+    rownames(X_data) <- rownames(myData)
+  } else {
+    X_data <- myData[,regressors_lablels]                                ## business as usual
+    X_data <- cbind(1, as.matrix(X_data))                                ## remember to always add an intercept
+    colnames(X_data) <- c("intercept", regressors_lablels)
+  }
+  n_regressors <- ncol(X_data) 
+  n_observ <- nrow(X_data) 
+  degrOfFreed <- n_observ - n_regressors
+  
+  temp_alpha <- n_observ/sum(((y_data/temp_mean)-1)^2)
+  alpha_1 <- NR_MLE_NB_alpha(X_data = X_data, y_data = y_data, p_alpha_init = temp_alpha, p_beta_fix = temp_beta,
+                             rate_param = rate_param , offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+  )
+  
+  ## 2) Alternating procedure                                                   ####
+  if(alpha_1$p_alpha < 0){ chosen_alpha <- 0} else { chosen_alpha <- alpha_1$p_alpha }
+  alpha_iter_lst  <- list()
+  max_iter3 <- big_alpha <- 100 
+  tol_gap3 <- 1e-6
+  gap3 <- 1                                                               
+  hessian_is_singular <- FALSE
+  
+  ## inherited from MASS::glm.nb
+  d1 <- sqrt(2*max(1,degrOfFreed))                                                                                       
+  d2 <- 1
+  Lm <- loglik_NB(X_data, 
+                  y_data, 
+                  p_beta = temp_beta, 
+                  p_alpha = chosen_alpha,
+                  rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+  )
+  Lm0 <- Lm + 2*d1                                                                             
+  stopping_criterion <- (abs(Lm0 - Lm)/d1 + abs(gap3)/d2)                                           
+  tol_stop <- 1e-4
+  iter_count3 <- 1
+  alpha_iter_lst[[iter_count3]] <- chosen_alpha 
+  
+  while ((iter_count3 < max_iter3) && (abs(gap3) > tol_gap3) && (stopping_criterion > tol_stop )) {
+    alpha_iter <- as.numeric(alpha_iter_lst[[iter_count3]]) 
+    negbin_fit_iter <- NR_MLE_NB(X_data = X_data, y_data = y_data, p_alpha_fix = alpha_iter, p_beta_init = temp_beta,
+                                 rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+    )
+    lambda_iter <- negbin_fit_iter$lambda   
+    beta_iter <- negbin_fit_iter$coef_est
+    temp_beta <- beta_iter 
+    mean_iter <- negbin_fit_iter$predict_y
+    temp_alpha <- n_observ/sum(((y_data/mean_iter)-1)^2)
+    alpha_refined <- NR_MLE_NB_alpha(X_data = X_data, y_data = y_data, p_alpha_init = temp_alpha, p_beta_fix = beta_iter,
+                                     rate_param = rate_param , offset_feat = offset_feat, offset_feat_value = offset_feat_value,  zerotrunc = zerotrunc)
+    
+    if(alpha_refined$p_alpha < 0){ chosen_alpha <- 0} else { chosen_alpha <- alpha_refined$p_alpha }
+    gap3 <- chosen_alpha - alpha_iter
+    Lm0 <- Lm
+    Lm <- loglik_NB(X_data, 
+                    y_data, 
+                    p_beta = beta_iter, 
+                    p_alpha = chosen_alpha,
+                    rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc
+    )  
+    stopping_criterion <- (abs(Lm0 - Lm)/d1 + abs(gap3)/d2) 
+    iter_count3 <- iter_count3 + 1
+    alpha_iter_lst[[iter_count3]] <- chosen_alpha 
+  }
+  
+  ## 3) Information                                ####
+  ## --- Expected Info: beta                       ####
+  EIM_beta <- FI_Beta(p_lambda = linkingFun(beta_iter, X_data),   ## For ZT Eq. S41
+                      p_alpha = chosen_alpha, 
+                      X = X_data, 
+                      y = y_data,
+                      rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  ## --- Expected Info: alpha                      ####
+  EIM_alpha <- FI_alpha(p_lambda = lambda_iter,                                 ## For ZT: NO eq at the moment
+                        p_alpha =  chosen_alpha, 
+                        X_data, 
+                        M = 50,
+                        rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  
+  ## --- Expected Info: theta                      ####
+  EIM_theta <- FI_theta(p_lambda = lambda_iter,                                 ## For ZT: Eq. S45
+                        p_alpha =  chosen_alpha,
+                        X_data, 
+                        M = 50,
+                        rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  
+  ## --- Expected info: x-derivatives                                           ## For ZT: Eq. S
+  EIM_offdiag_a <- FI_x_alpha(X = X_data, 
+                              y = y_data,
+                              p_alpha =  chosen_alpha,
+                              p_lambda = lambda_iter, 
+                              rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+  
+  
+  EIM_offdiag <- FI_x_theta(X = X_data, 
+                            y = y_data,
+                            p_alpha =  chosen_alpha,
+                            p_lambda = lambda_iter, 
+                            rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+  
+  ## --- Var, and SE (expected info)                            ####
+  if(!zerotrunc){
+    ## Diagonal Information matrix allows separate inversions
+    vcov_NB <- qr.solve(EIM_beta, tol = 1e-18)
+    SE_model_NB_expected_beta <- sqrt(diag(vcov_NB))
+    SE_model_NB_expected_beta2 <- SE_model_NB_expected_beta                        # for output reporting
+    
+    var_alpha_NB <- 1/EIM_alpha
+    SE_model_NB_expected_alpha <- sqrt(var_alpha_NB)
+    
+    var_theta_NB <- 1/EIM_theta$FI_theta_out                                       # Variance for theta
+    SE_modelk_NB_expected_theta <- sqrt(var_theta_NB)                              # SE for theta
+  } else {
+    ## Fisher information matrix  no longer diagonal
+    EIM <- rbind(cbind(EIM_beta, EIM_offdiag),
+                 cbind(t(EIM_offdiag), EIM_theta$FI_theta_out))
+    vcov_NB_expect_theta <-  qr.solve(EIM, tol = 1e-18)
+    SE_model_NB_expected_all_theta <- sqrt(diag(vcov_NB_expect_theta))
+    SE_model_NB_expected_beta <- SE_model_NB_expected_all_theta[1:n_regressors]
+    SE_model_NB_expected_theta <- SE_model_NB_expected_all_theta[n_regressors+1]
+    
+    ## In alpha
+    EIM_2 <- rbind(cbind(EIM_beta, EIM_offdiag_a),
+                   cbind(t(EIM_offdiag_a), EIM_alpha))
+    vcov_NB_expect_alpha <-  qr.solve(EIM_2, tol = 1e-18)
+    SE_model_NB_expected_all_alpha <- sqrt(diag(vcov_NB_expect_alpha))
+    SE_model_NB_expected_beta2 <- SE_model_NB_expected_all_alpha[1:n_regressors]
+    SE_model_NB_expected_alpha <- SE_model_NB_expected_all_alpha[n_regressors+1]
+    
+  } 
+  
+  
+  
+  ## Relationship between FI theta and FI_alpha (after https://math.stackexchange.com/a/5145608/1234572)
+  FI_theta_Lawless <- chosen_alpha^4*EIM_alpha
+  FI_theta_approx <- EIM_theta$FI_theta_out
+  FI_theta_approx_Lawless <- EIM_theta$Lawless
+  
+  
+  
+  ## --- Observed info                                          ####
+  Info_NB_obs_beta <- -1*hessian_NB(p_lambda = lambda_iter, 
+                                    p_alpha = chosen_alpha, 
+                                    X = X_data, 
+                                    y = y_data,
+                                    rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  
+  Info_NB_obs_alpha <- -1*Hessian_NB_alpha(y=y_data, 
+                                           p_alpha = chosen_alpha, 
+                                           p_lambda = lambda_iter,
+                                           rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  Info_NB_obs_theta <- -1*Hessian_NB_theta(y=y_data, 
+                                           p_alpha = chosen_alpha, 
+                                           p_lambda = lambda_iter,
+                                           rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
+  
+  
+  ## --- Var, and SE (observed info)                            ####
+  if(!zerotrunc){
+    ## Diagonal Inormation matrix allow separate inversions
+    vcov_NB_obs <-  qr.solve(Info_NB_obs_beta, tol = 1e-18)
+    SE_model_NB_obs_beta <- sqrt(diag(vcov_NB_obs))
+    SE_model_NB_obs2_beta <- SE_model_NB_obs_beta                               # for output reporting only
+    
+    var_NB_obs_alpha <- 1/Info_NB_obs_alpha
+    SE_model_NB_obs_alpha <- sqrt(var_NB_obs_alpha)
+    
+    var_NB_obs_theta <- 1/Info_NB_obs_theta
+    SE_model_NB_obs_theta <- sqrt(var_NB_obs_theta)
+  } else {
+    ## form the observed information matrix and invert
+    ## -- furst get the off-diagonal elements (x-derivatives) as these are no longer zero 
+    OIM_offdiag_alpha <- xd_NB_alpha(X = X_data, 
+                                     y = y_data,
+                                     p_alpha =  chosen_alpha,
+                                     p_lambda = lambda_iter, 
+                                     rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+    OIM_offdiag_theta <- -(1/chosen_alpha^2) * OIM_offdiag_alpha
+    
+    ## in theta
+    OIM <- rbind(cbind(Info_NB_obs_beta, OIM_offdiag_theta),
+                 cbind(t(OIM_offdiag_theta), Info_NB_obs_theta))
+    rownames(OIM) <- c(rownames(OIM_offdiag_alpha),"Info_NB_obs_theta") 
+    vcov_NB_obs_theta <-  qr.solve(OIM, tol = 1e-18)
+    SE_model_NB_obs <- sqrt(diag( vcov_NB_obs_theta))
+    SE_model_NB_obs_beta <- SE_model_NB_obs[1:n_regressors]
+    SE_model_NB_obs_theta <- SE_model_NB_obs[(n_regressors+1)]
+    
+    ## in alpha
+    OIM2 <- rbind(cbind(Info_NB_obs_beta, OIM_offdiag_alpha),
+                  cbind(t(OIM_offdiag_alpha), Info_NB_obs_alpha))
+    rownames(OIM2) <- c(rownames(OIM_offdiag_alpha),"Info_NB_obs_alpha")
+    vcov_NB_obs_alpha <-  qr.solve(OIM2, tol = 1e-18)
+    SE_model_NB_obs2 <- sqrt(diag( vcov_NB_obs_alpha))
+    SE_model_NB_obs2_beta <- SE_model_NB_obs2[1:n_regressors]
+    SE_model_NB_obs_alpha <- SE_model_NB_obs2[(n_regressors+1)]
+    
+  }
+  
+  
+  
+  
+  
+  ## 4) out                                                     ####
+  return(list(p_alpha_MLE=chosen_alpha, 
+              p_lambda_MLE=lambda_iter, 
+              p_beta_MLE=beta_iter,
+              p_mean = negbin_fit_iter$predict_y,
+              log_likelihood=Lm, 
+              n_iter=iter_count3,
+              negbin_fit_iter$GG_count,
+              SE_expected = list(SE_expected_all_theta = list(SE_expected_beta = SE_model_NB_expected_beta,
+                                                              SE_expected_theta = SE_model_NB_expected_theta),
+                                 SE_expeted_all_alpha = list(SE_expected_beta = SE_model_NB_expected_beta2,      # slightly different for ZT
+                                                             SE_expected_alpha = SE_model_NB_expected_alpha)
+              ),
+              SE_oberved = list(SE_obs_all_theta = list(SE_obs_beta = SE_model_NB_obs_beta,
+                                                        SE_obs_theta = SE_model_NB_obs_theta),
+                                SE_obs_all_alpha = list(SE_obs_beta = SE_model_NB_obs2_beta,                          # slightly different
+                                                        SE_obs_alpha = SE_model_NB_obs_alpha)
+              ),
+              Lawless_FI_theta = list(FI_theta_Lawless = FI_theta_Lawless,
+                                      FI_theta_approx = FI_theta_approx,
+                                      FI_theta_approx_Lawless = FI_theta_approx_Lawless
+              )
+  )
+  )
+}
 
 
 ##                                                           ####
 
-## Fisher Info and SE: wrt theta                             ####
-  
-## -- info fun with approximation for Expected Gamma         ####  
-  FI_theta <- function(p_lambda, p_alpha, FI_alpha, X, M =  20){
-    p_theta <- 1/p_alpha
-    fi_t2 <- sapply(1:length(p_lambda), function(i){
-      x_i <- X[i,]
-      p_lambda_i <- p_lambda[i]
-      fi_t1 <-  sapply(0:M, function(j){
-        nb_CDF_j <- negbin_CDF(j, p_lambda = p_lambda_i, p_alpha)
-        (1-nb_CDF_j )/(j+p_alpha)
-      })
-      - sum(fi_t1) + log(1+p_theta*p_lambda_i)
-    })
-    2/(p_theta^3) * sum(fi_t2) + 1/(p_theta^4)*FI_alpha
-  }
+
+##                                                           ####
+## Run numerical example 1 - baseline                        ####
+## a) Set arguments                                          ####
+target_feat = "g_DISRUPTIONS"
+
+## no offset, no zt
+offset_feat = NA
+rate_param = FALSE
+zerotrunc = FALSE
+
+## b) full alternating procedure                             ####
+test_NB <- NegBReg_altern(myData = myData, 
+                          target_feat =  target_feat,
+                          rate_param = rate_param, 
+                          offset_feat = offset_feat,
+                          zerotrunc = zerotrunc
+)
 
 
 
-## -- Variance and SE based on expected information          ####
-est_FI_theta <- FI_theta(p_lambda, p_alpha, est_FI_alpha, X, M = 50)
-var_theta_NB <- 1/est_FI_theta                                                # Variance for theta
-SE_model_NB_expected_theta <- sqrt(var_theta_NB)                              # SE for theta
 
-## -- Variance and SE based on observed information          ####
-est_FI_theta_obs <- ObsInfo_NB_theta(y, p_alpha, p_lambda)
-var_theta_NB_obs <- 1/est_FI_theta_obs
-SE_model_NB_obs_theta <- sqrt(var_theta_NB_obs)
-
-##                                             ####
-## Comparison with pre-built                   ####
+## c) Compare with pre-built                   ####
 ## --- MASS:glm.nb                             ####
 obj_NB <- MASS::glm.nb(g_DISRUPTIONS ~.,
                        data = myData)
@@ -578,9 +1311,9 @@ SE_gamlss <- sqrt(var_gamlss_coeff)
 
 library(VGAM)
 ## Syntax for fitting NB2 as in doi: 10.1111/anzs.12283 section 2
-obj_NB_vgam <- vglm(g_DISRUPTIONS ~. , 
-                   family  = negbinomial,
-                   data = myData)
+obj_NB_vgam <- VGAM::vglm(g_DISRUPTIONS ~. , 
+                          family  = negbinomial,
+                          data = myData)
 
 summary(obj_NB_vgam)
 coef(obj_NB_vgam, matrix = TRUE)
@@ -598,43 +1331,332 @@ obj_NB_vgam@predictors
 ## -- p.608 mentions it estimates both parmaters of the neg bin by full maximum likelihood estimation 
 ## -- p.609 mentions "For negbinomial() the diagonal element of the expected information matrix (EIM) for parameter k involves an infinite series; consequently SFS (see nsimEIM) is used as the backup algorithm
 var_vgam <- vcov(obj_NB_vgam)
-vgam_beta <- obj_NB_vgam@coefficients[c(1,3:length(obj_NB_vgam @coefficients))]
-vgam_beta_sE <- round(sqrt(diag(var_vgam)[c(1,3:length(obj_NB_vgam @coefficients))]),5)
+vgam_beta <- obj_NB_vgam@coefficients[c(1,3:length(obj_NB_vgam@coefficients))]
+vgam_beta_sE <- round(sqrt(diag(var_vgam)[c(1,3:length(obj_NB_vgam@coefficients))]),5)
 
 vgam_alpha <- exp(obj_NB_vgam@coefficients[2])
 vgam_lnAlpha_SE <- sqrt(diag(var_vgam)[2])   
 
 ## --- Table comparative                       ####
 tab_pre_built <-  round(summary(obj_NB)$coefficients[,1:2],5)
-tab_pre_built_GAMLSS <- round(cbind.data.frame(obj_NB_gam$mu.coefficients, SE_gamlss),5)
-tab_pre_built_VGAM <- round(cbind.data.frame(vgam_beta, vgam_beta_sE), 5)
-tab_fromScratch <- round(cbind.data.frame(test_NB$p_beta_MLE, SE_model_NB_expected, SE_model_NB_obs),5)
+tab_pre_built_GAMLSS <-  round(cbind.data.frame(obj_NB_gam$mu.coefficients, SE_gamlss),5)
+tab_pre_built_VGAM <- round(cbind.data.frame(vgam_beta, vgam_beta_sE),5 )
+tab_fromScratch <- round(cbind.data.frame(test_NB$p_beta_MLE, test_NB$SE_expected$SE_expected_beta, test_NB$SE_oberved$SE_obs_beta),5)
 
 tab_pre_built_alpha <- round(cbind.data.frame(summary(obj_NB)[17], summary(obj_NB)[18]),5)
 tab_pre_built_alpha_GAMLSS <- cbind.data.frame(round(alpha_gamlss,5), "n.a.")
-tab_pre_built_alpha_VGAM <- cbind.data.frame(round(vgam_alpha,5 ), "n.a.")
-tab_fromScratch_alpha <- round(cbind.data.frame(test_NB$p_alpha_MLE, SE_model_NB_expected_alpha, SE_mode_NB_obs_alpha),5)
+tab_pre_built_alpha_VGAM <- cbind.data.frame(round(vgam_alpha,5), "n.a.")
+tab_fromScratch_alpha <- round(cbind.data.frame(test_NB$p_alpha_MLE, test_NB$SE_expected$SE_expected_alpha, test_NB$SE_oberved$SE_obs_alpha),5)
 
-tab_pre_built_theta <- cbind.data.frame(round(1/obj_NB$theta,5 ), "n.a.")
-tab_pre_built_theta_GAMLSS <- cbind.data.frame(round(1/alpha_gamlss,5), "n.a.")
-tab_pre_built_theta_VGAM <- cbind.data.frame(round(1/vgam_alpha,5 ), "n.a.")
-tab_fromScratch_theta <- round(cbind.data.frame(1/test_NB$p_alpha_MLE, SE_model_NB_expected_theta, SE_model_NB_obs_theta ) , 5)
-  
+tab_pre_built_theta <- cbind.data.frame(round(as.numeric(1/unlist(summary(obj_NB)[17])),5), "n.a.")
+tab_pre_built_theta_GAMLSS <- cbind.data.frame(round(exp(obj_NB_gam$sigma.coefficients),5), "n.a.")
+tab_pre_built_theta_VGAM <-  cbind.data.frame(round(1/vgam_alpha,5), "n.a.")
+tab_fromScratch_theta <- round(cbind.data.frame(1/test_NB$p_alpha_MLE, test_NB$SE_oberved$SE_obs_theta, test_NB$SE_oberved$SE_obs_theta),5)
 
 colnames(tab_fromScratch)  <- c("Estimate", "SE expected", "SE observed")
 colnames(tab_pre_built) <- paste0(c("glmnb_"),colnames(tab_pre_built))
-colnames(tab_pre_built_GAMLSS) <- paste0(c("gamlss_coeff", "gamlss_SE"))
-colnames(tab_pre_built_VGAM) <- paste0(c("vglm_coeff", "vglm_SE"))
+colnames(tab_pre_built_GAMLSS) <- c("gamlss_coeff", "gamlss_SE")
+colnames(tab_pre_built_VGAM) <- c("vglm_coeff", "vglm_SE")
 
 a <- cbind.data.frame(tab_fromScratch, tab_pre_built, tab_pre_built_GAMLSS, tab_pre_built_VGAM)
 b <- cbind.data.frame(tab_fromScratch_alpha, tab_pre_built_alpha, tab_pre_built_alpha_GAMLSS, tab_pre_built_alpha_VGAM)
-c <- cbind.data.frame(tab_fromScratch_theta, tab_pre_built_theta, tab_pre_built_theta_GAMLSS,  tab_pre_built_theta_VGAM)
-colnames(b) <- colnames(c) <- colnames(a)
+c <- cbind.data.frame(tab_fromScratch_theta, tab_pre_built_theta, tab_pre_built_theta_GAMLSS, tab_pre_built_theta_VGAM)
 
+colnames(c) <- colnames(b) <- colnames(a)
 rownames(b) <- "alpha"
 rownames(c) <- "theta"
 
 myTab4viz <- rbind.data.frame(a, b, c)
 
-myTab4viz
+## Generate LaTeX export
+library(kableExtra)
+kbl(myTab4viz, format = "latex")
 
+
+
+
+##                                                           ####
+
+
+## Run numerical example 2 - offset                          ####
+## a) Set arguments                                          ####
+target_feat = "g_DISRUPTIONS"
+
+## Offset, no zt
+offset_feat = "d_TIME_offset"
+rate_param = TRUE
+zerotrunc = FALSE
+
+
+## b) full alternating procedure                             ####
+test_NB_offset <- NegBReg_altern(myData = myData, 
+                                 target_feat =  target_feat,
+                                 rate_param = rate_param, 
+                                 offset_feat = offset_feat,
+                                 zerotrunc = zerotrunc
+)
+
+
+test_NB_offset$p_beta_MLE
+test_NB_offset$p_alpha_MLE
+
+## c) Compare with pre-built                                 ####
+
+## --- MASS:glm.nb                             ####
+## Note: offset is specified in a different way compared with glm, via offset()
+## -- for an example of how to write an offset in glm.bn: https://stats.stackexchange.com/q/180260/513606
+obj_NB_off <- MASS::glm.nb(g_DISRUPTIONS ~ b_IS_BIO + g_CENTRES + g_SUBJECTS + offset(log(d_TIME_offset)),
+                           data = myData)
+obj_NB_off$coefficients
+obj_NB_off$theta
+1/obj_NB_off$theta           # dispersion parameter, to be compared with GAMLSS                               
+
+
+## --- GAMLSS                                  ####
+obj_NB_gam_off <- gamlss::gamlss(g_DISRUPTIONS ~ b_IS_BIO + g_CENTRES + g_SUBJECTS + offset(log(d_TIME_offset)),
+                                 family = "NBI",
+                                 data = myData) 
+obj_NB_gam_off$mu.coefficients
+exp(obj_NB_gam_off$sigma.coefficients)                                      # dispersion parameter
+alpha_gamlss_off <- 1/exp(obj_NB_gam_off$sigma.coefficients)
+
+##
+summary(obj_NB_gam_off)[1:5,]
+
+## extract standar errors
+var_gamlss_off <- vcov(obj_NB_gam_off)
+var_gamlss_coeff_off <- diag(var_gamlss[1:(nrow(var_gamlss_off)-1), 1:(ncol(var_gamlss_off)-1)])
+var_gamlss_logTheta_off <- diag(var_gamlss_off)[nrow(var_gamlss_off)]
+SE_gamlss_off <- sqrt(var_gamlss_coeff_off)
+
+
+## --- VGAM                                    ####
+
+## Syntax for fitting NB2 as in doi: 10.1111/anzs.12283 section 2
+library(VGAM)
+# obj_NB_vgam_off <- VGAM::vglm(g_DISRUPTIONS ~ b_IS_BIO + g_CENTRES + g_SUBJECTS + offset(log(d_TIME_offset)), 
+#                           family  = negbinomial,
+#                           data = myData)
+
+obj_NB_vgam_off <- VGAM::vglm(g_DISRUPTIONS ~ b_IS_BIO + g_CENTRES + g_SUBJECTS,
+                              offset = log(d_TIME_offset),
+                              family  = negbinomial,
+                              data = myData)
+
+summary(obj_NB_vgam_off)
+coef(obj_NB_vgam_off, matrix = TRUE)
+
+obj_NB_vgam_off@coefficients
+obj_NB_vgam_off@predictors
+
+var_vgam_off <- vcov(obj_NB_vgam_off)
+vgam_beta_off <- obj_NB_vgam_off@coefficients[c(1,3:length(obj_NB_vgam_off@coefficients))]
+vgam_beta_sE_off <- round(sqrt(diag(var_vgam_off)[c(1,3:length(obj_NB_vgam_off@coefficients))]),5)
+
+vgam_alpha_off <- exp(obj_NB_vgam_off@coefficients[2])
+vgam_lnAlpha_SE_off <- sqrt(diag(var_vgam_off)[2])   
+
+
+## --- Table comparative                       ####
+tab_pre_built_off  <-  round(summary(obj_NB_off)$coefficients[,1:2],5)
+tab_pre_built_GAMLSS_off  <- round(cbind.data.frame(obj_NB_gam_off$mu.coefficients, SE_gamlss),5)
+tab_pre_built_VGAM_off <- round(cbind.data.frame(vgam_beta_off, vgam_beta_sE_off),5 )
+tab_fromScratch_off  <- round(cbind.data.frame(test_NB_offset$p_beta_MLE, test_NB_offset$SE_expected$SE_expected_beta, test_NB_offset$SE_oberved$SE_obs_beta),5)
+
+tab_pre_built_alpha_off  <- round(cbind.data.frame(summary(obj_NB_off)[17], summary(obj_NB_off)[18]),5)
+tab_pre_built_alpha_GAMLSS_off  <- cbind.data.frame(round(alpha_gamlss_off,5), "n.a.")
+tab_pre_built_alpha_VGAM_off <- cbind.data.frame(round(vgam_alpha_off,5), "n.a.")
+tab_fromScratch_alpha_off  <- round(cbind.data.frame(test_NB_offset$p_alpha_MLE, test_NB_offset$SE_expected$SE_expected_alpha, test_NB_offset$SE_oberved$SE_obs_alpha),5)
+
+tab_pre_built_theta_off <- cbind.data.frame(round(as.numeric(1/unlist(summary(obj_NB_off)[17])),5), "n.a.")
+tab_pre_built_theta_GAMLSS_off <- cbind.data.frame(round(exp(obj_NB_gam_off$sigma.coefficients),5), "n.a.")
+tab_pre_built_theta_VGAM_off <-  cbind.data.frame(round(1/vgam_alpha_off,5), "n.a.")
+tab_fromScratch_theta_off <- round(cbind.data.frame(1/test_NB_offset$p_alpha_MLE, test_NB_offset$SE_oberved$SE_obs_theta, test_NB_offset$SE_oberved$SE_obs_theta),5)
+
+
+colnames(tab_fromScratch_off)  <- c("Estimate", "SE expected", "SE observed")
+colnames(tab_pre_built_off) <- paste0(c("glmnb_"),colnames(tab_pre_built_off))
+colnames(tab_pre_built_GAMLSS_off) <- paste0(c("gamlss_coeff", "gamlss_SE"))
+colnames(tab_pre_built_VGAM_off) <- c("vglm_coeff", "vglm_SE")
+
+a <- cbind.data.frame(tab_fromScratch_off, tab_pre_built_off, tab_pre_built_GAMLSS_off, tab_pre_built_VGAM_off)
+b <- cbind.data.frame(tab_fromScratch_alpha_off, tab_pre_built_alpha_off, tab_pre_built_alpha_GAMLSS_off, tab_pre_built_alpha_VGAM_off)
+c <- cbind.data.frame(tab_fromScratch_theta_off, tab_pre_built_theta_off, tab_pre_built_theta_GAMLSS_off, tab_pre_built_theta_VGAM_off)
+
+colnames(c) <- colnames(b) <- colnames(a)
+rownames(b) <- "alpha"
+rownames(c) <- "theta"
+
+myTab4viz_off <- rbind.data.frame(a, b, c)
+
+## Generate LaTeX export
+library(kableExtra)
+kbl(myTab4viz_off, format = "latex")
+
+
+##                                                           ####
+## Run numerical example 3 - ZT                              ####
+## OPTIONAL: ALTER DATA TO FIX positive Hessian ####
+
+# newCol <- myData$g_SUBJECTS/myData$g_CENTRES
+# newT <- myData$d_TIME_offset/12 
+# 
+# myData_old <- myData
+# # myData <- cbind.data.frame(myData$b_IS_BIO, newT, newCol, myData$g_DISRUPTIONS)
+# # colnames(myData) <- c("b_IS_BIO", "d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
+# 
+# myData <- cbind.data.frame(newT, newCol, myData$g_DISRUPTIONS)
+# colnames(myData) <- c("d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
+# 
+
+## a) Set arguments                                          ####
+target_feat = "g_DISRUPTIONS"
+
+## zero truncation, no offset
+offset_feat = NA
+rate_param = FALSE
+zerotrunc = TRUE
+
+
+## zero truncation and offset
+#offset_feat = "d_TIME_offset"
+#rate_param = TRUE
+#zerotrunc = TRUE
+
+## b) full alternating procedure                             ####
+test_NB_ZT <- NegBReg_altern(myData = myData, 
+                             target_feat =  target_feat,
+                             rate_param = rate_param, 
+                             offset_feat = offset_feat,
+                             zerotrunc = zerotrunc
+)
+
+
+test_NB_ZT$p_beta_MLE
+test_NB_ZT$p_alpha_MLE
+## c) Compare with pre-built                                 ####
+## --- GAMLSS                                  ####
+
+## As in Hilbe (2011) Ch. 11
+library(gamlss.tr)
+gen.trun(0, "NBI", type="left", name = "lefttr")
+obj_NB_gam_ZT <- gamlss(g_DISRUPTIONS ~.,
+                        data = myData,
+                        family = "NBIlefttr") 
+
+obj_NB_gam_ZT$mu.coefficients
+exp(obj_NB_gam_ZT$sigma.coefficients)                                      # dispersion parameter
+alpha_gamlss_ZT <- 1/exp(obj_NB_gam_ZT$sigma.coefficients)
+
+summary(obj_NB_gam_ZT)
+
+## extract standar errors
+var_gamlss_ZT <- vcov(obj_NB_gam_ZT)
+var_gamlss_coeff_ZT <- diag(var_gamlss_ZT[1:(nrow(var_gamlss_ZT)-1), 1:(ncol(var_gamlss_ZT)-1)])
+var_gamlss_logTheta_ZT <- diag(var_gamlss_ZT)[nrow(var_gamlss_ZT)]
+SE_gamlss_ZT <- sqrt(var_gamlss_coeff_ZT)
+
+## --- VGAM                                    ####
+
+## see Yee (2020) paper
+library(VGAM)
+obj_NB_vgam_ZT <- VGAM::vglm(g_DISRUPTIONS ~.,
+                             family  = posnegbinomial,
+                             data = myData)
+
+vgam_beta_ZT <- obj_NB_vgam_ZT@coefficients[c(1,3:length(obj_NB_vgam_ZT@coefficients))]
+vgam_alpha_ZT <- exp(obj_NB_vgam_ZT@coefficients[2])
+
+coef(obj_NB_vgam_ZT, matrix = TRUE)
+
+var_vgam_ZT <- vcov(obj_NB_vgam_ZT)
+vgam_beta_sE_ZT <- round(sqrt(diag(var_vgam_ZT)[c(1,3:length(obj_NB_vgam_ZT@coefficients))]),5)
+
+vgam_alpha_ZT <- exp(obj_NB_vgam_ZT@coefficients[2])
+vgam_lnAlpha_SE_ZT <- sqrt(diag(var_vgam_ZT)[2]) 
+
+## --- Table comparative                       ####
+tab_pre_built_ZT  <-  cbind.data.frame("n.a.", "n.a.")
+tab_pre_built_GAMLSS_ZT  <- round(cbind.data.frame(obj_NB_gam_ZT$mu.coefficients, SE_gamlss_ZT),5)
+tab_pre_built_VGAM_ZT <- round(cbind.data.frame(vgam_beta_ZT, vgam_beta_sE_ZT),5 )
+tab_fromScratch_ZT  <- round(cbind.data.frame(test_NB_ZT$p_beta_MLE, 
+                                              test_NB_ZT$SE_expected$SE_expected_all_theta$SE_expected_beta,  ## note: the SE for beta change slighly in the ZT spec depending on whether we used theta or alpha. For the table i will for theta 
+                                              test_NB_ZT$SE_oberved$SE_obs_all_theta$SE_obs_beta),5)
+
+tab_pre_built_alpha_ZT  <- cbind.data.frame("n.a.", "n.a.")
+tab_pre_built_alpha_GAMLSS_ZT  <- cbind.data.frame(round(alpha_gamlss_ZT,5), "n.a.")
+tab_pre_built_alpha_VGAM_ZT <- cbind.data.frame(round(vgam_alpha_ZT,5), "n.a.")
+tab_fromScratch_alpha_ZT  <- round(cbind.data.frame(test_NB_ZT$p_alpha_MLE, 
+                                                    test_NB_ZT$SE_expected$SE_expeted_all_alpha$SE_expected_alpha,
+                                                    test_NB_ZT$SE_oberved$SE_obs_all_alpha$SE_obs_alpha),5)
+
+tab_pre_built_theta_ZT <- cbind.data.frame("n.a.", "n.a.")
+tab_pre_built_theta_GAMLSS_ZT <- cbind.data.frame(round(exp(obj_NB_gam_ZT$sigma.coefficients),5), "n.a.")
+tab_pre_built_theta_VGAM_ZT <-  cbind.data.frame(round(1/vgam_alpha_ZT,5), "n.a.")
+tab_fromScratch_theta_ZT <- round(cbind.data.frame(1/test_NB_ZT$p_alpha_MLE, 
+                                                   test_NB_ZT$SE_expected$SE_expected_all_theta$SE_expected_theta,
+                                                   test_NB_ZT$SE_oberved$SE_obs_all_theta$SE_obs_theta),5)
+
+
+colnames(tab_fromScratch_ZT)  <- c("Estimate", "SE expected", "SE observed")
+colnames(tab_pre_built_ZT) <- paste0(c("glmnb_"),colnames(tab_pre_built_ZT))
+colnames(tab_pre_built_GAMLSS_ZT) <- paste0(c("gamlss_coeff", "gamlss_SE"))
+colnames(tab_pre_built_VGAM_ZT) <- c("vglm_coeff", "vglm_SE")
+
+a <- cbind.data.frame(tab_fromScratch_ZT, tab_pre_built_ZT, tab_pre_built_GAMLSS_ZT, tab_pre_built_VGAM_ZT)
+b <- cbind.data.frame(tab_fromScratch_alpha_ZT, tab_pre_built_alpha_ZT, tab_pre_built_alpha_GAMLSS_ZT, tab_pre_built_alpha_VGAM_ZT)
+c <- cbind.data.frame(tab_fromScratch_theta_ZT, tab_pre_built_theta_ZT, tab_pre_built_theta_GAMLSS_ZT, tab_pre_built_theta_VGAM_ZT)
+
+colnames(c) <- colnames(b) <- colnames(a)
+rownames(b) <- "alpha"
+rownames(c) <- "theta"
+
+myTab4viz_ZT <- rbind.data.frame(a, b, c)
+
+## Generate LaTeX export
+library(kableExtra)
+kbl(myTab4viz_ZT, format = "latex")
+
+
+##                                                           ####
+##                                                           ####
+## Run test - medpar data                                    ####
+## -- data test medpar Hilbe                                 ####
+
+## Notice: a version of the example in STATA here https://www.stata.com/manuals13/rtnbreg.pdf
+
+library(COUNT)
+data(medpar)
+data_medpar <- medpar[,c("los", "died", "hmo", "type2", "type3")]
+myData <- data_medpar
+
+## -- data test UCLA                                         ####
+# same example using VGAM https://stats.oarc.ucla.edu/r/dae/zero-truncated-negative-binomial/
+
+
+## -- Set arguments                                          ####
+target_feat = "los"
+
+## zero truncation, no offset
+offset_feat = NA
+rate_param = FALSE
+zerotrunc = TRUE
+
+
+## -- Run own                                                ####
+test_NB_ZT_medpar <- NegBReg_altern(myData = myData, 
+                                    target_feat =  target_feat,
+                                    rate_param = rate_param, 
+                                    offset_feat = offset_feat,
+                                    zerotrunc = zerotrunc
+)
+
+## -- ###
+library(gamlss.tr)
+gen.trun(0, "NBI", type="left", name = "lefttr")
+obj_NB_gam_ZT_medpar <- gamlss(los ~.,
+                               data = myData,
+                               family = "NBIlefttr") 
+
+obj_NB_gam_ZT_medpar$mu.coefficients
+alpha_gamlss_ZT_medpar <- 1/exp(obj_NB_gam_ZT_medpar$sigma.coefficients)
