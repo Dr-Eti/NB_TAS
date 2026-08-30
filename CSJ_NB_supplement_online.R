@@ -11,8 +11,22 @@ source("aux_functions/aux_Pois_fun_ZT.R")
 
 ## -- read data                                              ####
 mypath <- "./data"
-myData <- read.csv(paste0(mypath, "/CJS_NB_example_ZT.csv", collapse = " "), header = TRUE, row.names=1)
+myData <- read.csv(paste0(mypath, "/TAS_NB_example_ZT.csv", collapse = " "), header = TRUE, row.names=1)
 
+
+
+## -- OPTIONAL: ALTER DATA to an even simpler example        ####
+
+# newCol <- myData$g_SUBJECTS/myData$g_CENTRES
+# newT <- myData$d_TIME_offset/12
+# 
+# myData_old <- myData
+# # myData <- cbind.data.frame(myData$b_IS_BIO, newT, newCol, myData$g_DISRUPTIONS)
+# # colnames(myData) <- c("b_IS_BIO", "d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
+# 
+# myData <- cbind.data.frame(newT, newCol, myData$g_DISRUPTIONS)
+# colnames(myData) <- c("d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
+# 
 
 
 ##                                                           ####
@@ -462,8 +476,6 @@ xd_NB_alpha <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat
   #p_alpha =  chosen_alpha
   #p_lambda = lambda_iter 
   
-  
-  zerotrunc = TRUE
   if(p_alpha == 0){
     p_theta <- 0
   } else {
@@ -545,10 +557,11 @@ myHalfStepping_NB <- function(X_data, y_data, beta_iter, Hessian_iter, g_gradien
 NR_MLE_NB <- function(X_data, y_data, p_alpha_fix, p_beta_init, iter_max = 100, halfstep = TRUE, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE, BHHH = FALSE){
   
   ## FOR DEBUG 
-  iter_max = 100
-  halfstep = FALSE
-  p_alpha_fix = alpha_iter
-  p_beta_init = temp_beta
+  #iter_max = 100
+  #halfstep = FALSE
+  #p_alpha_fix = alpha_iter
+  #p_beta_init = temp_beta
+  
   # if(!zerotrunc){
   #   beta_iter <- p_beta_init
   # } else {
@@ -716,10 +729,10 @@ NR_MLE_NB_alpha <- function(X_data, y_data, p_alpha_init, p_beta_fix, iter_max =
 FI_Beta <- function(p_lambda, p_alpha, X, y, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
   
   ## DEBUG
-  p_lambda = linkingFun(beta_iter, X_data)   ## For ZT Eq. S41
-  p_alpha = chosen_alpha
-  X = X_data 
-  y = y_data
+  #p_lambda = linkingFun(beta_iter, X_data)   ## For ZT Eq. S41
+  #p_alpha = chosen_alpha
+  #X = X_data 
+  #y = y_data
   
   
   
@@ -834,6 +847,12 @@ FI_Beta <- function(p_lambda, p_alpha, X, y, rate_param = FALSE, offset_feat = N
 ## -- Theta must call this function with zerotrunc = FALSE
 
 FI_alpha <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = zerotrunc){
+  
+  ## Debug
+  p_lambda = lambda_iter                               
+  p_alpha =  chosen_alpha
+  X = X_data 
+  
   if(rate_param & !is.na(offset_feat)){
     p_lambda_offset <- p_lambda*offset_feat_value                             
     p_lambda <- p_lambda_offset
@@ -877,11 +896,25 @@ FI_alpha <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_f
 ## -- p_lambda <- linkingFun(beta_iter = reg_coeff_iter, X = X)  without offset ie., just exp(X %*% beta_iter)
 
 FI_theta <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_feat = NA, offset_feat_value = NA, zerotrunc = FALSE){
+  
+  ## Debug
+  #p_lambda = lambda_iter                                
+  #p_alpha =  chosen_alpha
+  #X = X_data 
+  
+  
   if(p_alpha == 0){
     p_theta <- 0
   } else {
     p_theta <- 1/p_alpha
   }
+  EI_alpha <- FI_alpha(p_lambda = p_lambda,                                
+                       p_alpha =  p_alpha,
+                       X = X,
+                       M = 50,
+                       rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, 
+                       zerotrunc = FALSE                                        ## KEEP IT SET TO FALSE IN THIS CALL
+  )
   if(rate_param & !is.na(offset_feat)){
     p_lambda_offset <- p_lambda*offset_feat_value                             
     p_lambda <- p_lambda_offset
@@ -897,13 +930,7 @@ FI_theta <- function(p_lambda, p_alpha, X, M =  20, rate_param = FALSE, offset_f
   })
   ##Check main paper: 2/(p_theta^3) * sum(fi_t2)  should be close to 0
   a <- 2/(p_theta^3) * sum(fi_t2)
-  b <- 1/(p_theta^4)*FI_alpha(p_lambda, 
-                              p_alpha, 
-                              X, 
-                              M =  M, 
-                              rate_param = rate_param, 
-                              offset_feat = offset_feat,
-                              zerotrunc = FALSE)                                ## KEEP IT SET TO FALSE IN THIS CALL
+  b <- 1/(p_theta^4)*EI_alpha                               
   if(zerotrunc){
     d <- 1 + p_theta*p_lambda
     phi <- 1/d^p_alpha
@@ -939,7 +966,12 @@ FI_x_alpha <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat 
   
   ## Similar to xd_NB_alpha except for the use of the mean function and sign (expectation of minus second derivative)
   
-  zerotrunc = TRUE
+  ## Debug
+  #X = X_data
+  #y = y_data
+  #p_alpha =  chosen_alpha
+  #p_lambda = lambda_iter
+  
   if(p_alpha == 0){
     p_theta <- 0
   } else {
@@ -962,8 +994,8 @@ FI_x_alpha <- function(X, y, p_alpha, p_lambda, rate_param = FALSE, offset_feat 
                      p_alpha = p_alpha, 
                      rate_param = rate_param, 
                      offset_feat = offset_feat,
-                     offset_feat_value = offset_feat_value,
-                     zerotrunc = zerotrunc)
+                     offset_feat_value = offset_feat_value[i],                  
+                     zerotrunc = TRUE)
     a <- (p_lambda[i]*y_mean_i)/(p_alpha*(p_alpha + p_lambda[i])^2)
     b <- dg_fun
     c <- (p_lambda[i]/(p_alpha + p_lambda[i])) * (phi/(1 - phi)) * ( (p_lambda[i]/(p_alpha*(p_alpha + p_lambda[i]))) + (dphi / (1 - phi)) + g_fun )
@@ -1103,24 +1135,27 @@ NegBReg_altern <- function(myData, target_feat =  target_feat, rate_param = FALS
   ## --- Expected Info: theta                      ####
   EIM_theta <- FI_theta(p_lambda = lambda_iter,                                 ## For ZT: Eq. S45
                         p_alpha =  chosen_alpha,
-                        X_data, 
+                        X = X_data, 
                         M = 50,
                         rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value, zerotrunc = zerotrunc)
   
-  
-  ## --- Expected info: x-derivatives                                           ## For ZT: Eq. S
-  EIM_offdiag_a <- FI_x_alpha(X = X_data, 
+  if(zerotrunc){
+    ## --- Expected info: x-derivatives                                           ## For ZT: Eq. S
+    EIM_offdiag_a <- FI_x_alpha(X = X_data, 
+                                y = y_data,
+                                p_alpha =  chosen_alpha,
+                                p_lambda = lambda_iter, 
+                                rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+    
+    
+    EIM_offdiag <- FI_x_theta(X = X_data, 
                               y = y_data,
                               p_alpha =  chosen_alpha,
                               p_lambda = lambda_iter, 
                               rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
-  
-  
-  EIM_offdiag <- FI_x_theta(X = X_data, 
-                            y = y_data,
-                            p_alpha =  chosen_alpha,
-                            p_lambda = lambda_iter, 
-                            rate_param = rate_param, offset_feat = offset_feat, offset_feat_value = offset_feat_value)
+  } else {
+    EIM_offdiag_a <- EIM_offdiag <- NA
+  }
   
   ## --- Var, and SE (expected info)                            ####
   if(!zerotrunc){
@@ -1133,7 +1168,7 @@ NegBReg_altern <- function(myData, target_feat =  target_feat, rate_param = FALS
     SE_model_NB_expected_alpha <- sqrt(var_alpha_NB)
     
     var_theta_NB <- 1/EIM_theta$FI_theta_out                                       # Variance for theta
-    SE_modelk_NB_expected_theta <- sqrt(var_theta_NB)                              # SE for theta
+    SE_model_NB_expected_theta <- sqrt(var_theta_NB)                              # SE for theta
   } else {
     ## Fisher information matrix  no longer diagonal
     EIM <- rbind(cbind(EIM_beta, EIM_offdiag),
@@ -1257,6 +1292,20 @@ NegBReg_altern <- function(myData, target_feat =  target_feat, rate_param = FALS
 ##                                                           ####
 
 
+## E) Significance ####
+myMLEsignif <- function(my_SE, my_p_est){
+  
+  modse_zValues <- my_p_est/my_SE
+  if(!is.matrix(modse_zValues)){modse_zValues <- as.matrix(modse_zValues)}
+  modse_signifc <- 2*pnorm(abs(modse_zValues), lower.tail = FALSE)
+  est_summary_table <- cbind.data.frame(round(my_p_est,3),
+                                        round(my_SE,3) ,
+                                        round(modse_zValues,3), 
+                                        round(modse_signifc,3))
+  colnames(est_summary_table) <- c("Estimate", "S.E.", "z values", "Pr(>|z|)")
+  est_summary_table
+}
+
 ##                                                           ####
 ## Run numerical example 1 - baseline                        ####
 ## a) Set arguments                                          ####
@@ -1267,7 +1316,7 @@ offset_feat = NA
 rate_param = FALSE
 zerotrunc = FALSE
 
-## b) full alternating procedure                             ####
+## b1) full alternating procedure                            ####
 test_NB <- NegBReg_altern(myData = myData, 
                           target_feat =  target_feat,
                           rate_param = rate_param, 
@@ -1275,8 +1324,48 @@ test_NB <- NegBReg_altern(myData = myData,
                           zerotrunc = zerotrunc
 )
 
+## b2) significance                                          ####
+## -- expected, alpha param
+test_signif_A11_beta_exp <- myMLEsignif(my_SE = test_NB$SE_expected$SE_expeted_all_alpha$SE_expected_beta, 
+                                        my_p_est= test_NB$p_beta_MLE)
+test_signif_A21_alpha_exp <- myMLEsignif(my_SE = test_NB$SE_expected$SE_expeted_all_alpha$SE_expected_alpha, 
+                                         my_p_est= test_NB$p_alpha_MLE)
+tab_signif_A <- rbind(test_signif_A11_beta_exp, test_signif_A21_alpha_exp)
+rownames(tab_signif_A)[nrow(tab_signif_A)] <- "alpha"
+
+## -- observed, alpha param
+test_signif_A12_beta_obs <- myMLEsignif(my_SE = test_NB$SE_oberved$SE_obs_all_alpha$SE_obs_beta, 
+                                        my_p_est= test_NB$p_beta_MLE)
+test_signif_A22_alpha_obs <- myMLEsignif(my_SE = test_NB$SE_oberved$SE_obs_all_alpha$SE_obs_alpha, 
+                                         my_p_est= test_NB$p_alpha_MLE)
+test_signif_A_obs <- rbind(test_signif_A12_beta_obs, test_signif_A22_alpha_obs)
+rownames(test_signif_A_obs)[nrow(test_signif_A_obs)] <- "alpha"
+colnames(test_signif_A_obs) <- paste0(colnames(test_signif_A_obs),"_obs")
+
+## -- assemble
+tab_signif_A <- cbind(tab_signif_A, test_signif_A_obs[,-1])
 
 
+## -- expected, theta param
+test_signif_A11_beta_exp_dp <- myMLEsignif(my_SE = test_NB$SE_expected$SE_expected_all_theta$SE_expected_beta, 
+                                           my_p_est= test_NB$p_beta_MLE)
+test_signif_A21_theta_exp_dp <- myMLEsignif(my_SE = test_NB$SE_expected$SE_expected_all_theta$SE_expected_theta, 
+                                            my_p_est= 1/test_NB$p_alpha_MLE)
+tab_signif_A_dp <- rbind(test_signif_A11_beta_exp_dp, test_signif_A21_theta_exp_dp)
+rownames(tab_signif_A_dp)[nrow(tab_signif_A_dp)] <- "theta"
+
+## -- observed, theta param
+test_signif_A12_beta_obs_dp <- myMLEsignif(my_SE = test_NB$SE_oberved$SE_obs_all_theta$SE_obs_beta, 
+                                           my_p_est= test_NB$p_beta_MLE)
+
+test_signif_A22_theta_obs_dp <- myMLEsignif(my_SE = test_NB$SE_oberved$SE_obs_all_theta$SE_obs_theta, 
+                                            my_p_est= 1/test_NB$p_alpha_MLE)
+tab_signif_A_obs_dp <- rbind(test_signif_A12_beta_obs_dp , test_signif_A22_theta_obs_dp )
+rownames(tab_signif_A_obs_dp)[nrow(tab_signif_A_obs_dp)] <- "theta"
+colnames(tab_signif_A_obs_dp) <- paste0(colnames(tab_signif_A_obs_dp),"_obs")
+
+## -- assemble
+tab_signif_A_dp <- cbind(tab_signif_A_dp, tab_signif_A_obs_dp[,-1])
 
 ## c) Compare with pre-built                   ####
 ## --- MASS:glm.nb                             ####
@@ -1388,7 +1477,7 @@ rate_param = TRUE
 zerotrunc = FALSE
 
 
-## b) full alternating procedure                             ####
+## b1) full alternating procedure                            ####
 test_NB_offset <- NegBReg_altern(myData = myData, 
                                  target_feat =  target_feat,
                                  rate_param = rate_param, 
@@ -1399,6 +1488,49 @@ test_NB_offset <- NegBReg_altern(myData = myData,
 
 test_NB_offset$p_beta_MLE
 test_NB_offset$p_alpha_MLE
+
+## b2) Significance                                          ####
+## -- expected, alpha param
+test_signif_B11_beta_exp <- myMLEsignif(my_SE = test_NB_offset$SE_expected$SE_expeted_all_alpha$SE_expected_beta, 
+                                        my_p_est= test_NB_offset$p_beta_MLE)
+test_signif_B21_alpha_exp <- myMLEsignif(my_SE = test_NB_offset$SE_expected$SE_expeted_all_alpha$SE_expected_alpha, 
+                                         my_p_est= test_NB_offset$p_alpha_MLE)
+tab_signif_B <- rbind(test_signif_B11_beta_exp, test_signif_B21_alpha_exp)
+rownames(tab_signif_B)[nrow(tab_signif_B)] <- "alpha"
+
+## -- observed, alpha param
+test_signif_B12_beta_obs <- myMLEsignif(my_SE = test_NB_offset$SE_oberved$SE_obs_all_alpha$SE_obs_beta, 
+                                        my_p_est= test_NB_offset$p_beta_MLE)
+test_signif_B22_alpha_obs <- myMLEsignif(my_SE = test_NB_offset$SE_oberved$SE_obs_all_alpha$SE_obs_alpha, 
+                                         my_p_est= test_NB_offset$p_alpha_MLE)
+test_signif_B_obs <- rbind(test_signif_B12_beta_obs, test_signif_B22_alpha_obs)
+rownames(test_signif_B_obs)[nrow(test_signif_B_obs)] <- "alpha"
+colnames(test_signif_B_obs) <- paste0(colnames(test_signif_B_obs),"_obs")
+
+## -- assemble
+tab_signif_B_offset <- cbind(tab_signif_B, test_signif_B_obs[,-1])
+
+## -- expected, theta param
+test_signif_B11_beta_exp_dp <- myMLEsignif(my_SE = test_NB_offset$SE_expected$SE_expected_all_theta$SE_expected_beta, 
+                                           my_p_est= test_NB_offset$p_beta_MLE)
+test_signif_B21_theta_exp_dp <- myMLEsignif(my_SE = test_NB_offset$SE_expected$SE_expected_all_theta$SE_expected_theta, 
+                                            my_p_est= 1/test_NB_offset$p_alpha_MLE)
+tab_signif_B_dp <- rbind(test_signif_B11_beta_exp_dp, test_signif_B21_theta_exp_dp)
+rownames(tab_signif_B_dp)[nrow(tab_signif_B_dp)] <- "theta"
+
+## -- observed, theta param
+test_signif_B12_beta_obs_dp <- myMLEsignif(my_SE = test_NB_offset$SE_oberved$SE_obs_all_theta$SE_obs_beta, 
+                                           my_p_est= test_NB_offset$p_beta_MLE)
+
+test_signif_B22_theta_obs_dp <- myMLEsignif(my_SE = test_NB_offset$SE_oberved$SE_obs_all_theta$SE_obs_theta, 
+                                            my_p_est= 1/test_NB_offset$p_alpha_MLE)
+tab_signif_B_obs_dp <- rbind(test_signif_B12_beta_obs_dp , test_signif_B22_theta_obs_dp )
+rownames(tab_signif_B_obs_dp)[nrow(tab_signif_B_obs_dp)] <- "theta"
+colnames(tab_signif_B_obs_dp) <- paste0(colnames(tab_signif_B_obs_dp),"_obs")
+
+## -- assemble
+tab_signif_B_dp_offset <- cbind(tab_signif_B_dp, tab_signif_B_obs_dp[,-1])
+
 
 ## c) Compare with pre-built                                 ####
 
@@ -1496,19 +1628,6 @@ kbl(myTab4viz_off, format = "latex")
 
 ##                                                           ####
 ## Run numerical example 3 - ZT                              ####
-## OPTIONAL: ALTER DATA TO FIX positive Hessian ####
-
-# newCol <- myData$g_SUBJECTS/myData$g_CENTRES
-# newT <- myData$d_TIME_offset/12 
-# 
-# myData_old <- myData
-# # myData <- cbind.data.frame(myData$b_IS_BIO, newT, newCol, myData$g_DISRUPTIONS)
-# # colnames(myData) <- c("b_IS_BIO", "d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
-# 
-# myData <- cbind.data.frame(newT, newCol, myData$g_DISRUPTIONS)
-# colnames(myData) <- c("d_TIME_offset", "g_SubCent_ratio", "g_DISRUPTIONS")
-# 
-
 ## a) Set arguments                                          ####
 target_feat = "g_DISRUPTIONS"
 
@@ -1523,7 +1642,7 @@ zerotrunc = TRUE
 #rate_param = TRUE
 #zerotrunc = TRUE
 
-## b) full alternating procedure                             ####
+## b1) full alternating procedure                             ####
 test_NB_ZT <- NegBReg_altern(myData = myData, 
                              target_feat =  target_feat,
                              rate_param = rate_param, 
@@ -1534,6 +1653,52 @@ test_NB_ZT <- NegBReg_altern(myData = myData,
 
 test_NB_ZT$p_beta_MLE
 test_NB_ZT$p_alpha_MLE
+
+
+## b2) Significance ####
+## -- expected, alpha param
+test_signif_C11_beta_exp <- myMLEsignif(my_SE = test_NB_ZT$SE_expected$SE_expeted_all_alpha$SE_expected_beta, 
+                                        my_p_est= test_NB_ZT$p_beta_MLE)
+test_signif_C21_alpha_exp <- myMLEsignif(my_SE = test_NB_ZT$SE_expected$SE_expeted_all_alpha$SE_expected_alpha, 
+                                         my_p_est= test_NB_ZT$p_alpha_MLE)
+tab_signif_C <- rbind(test_signif_C11_beta_exp, test_signif_C21_alpha_exp)
+rownames(tab_signif_C)[nrow(tab_signif_C)] <- "alpha"
+
+## -- observed, alpha param
+test_signif_C12_beta_obs <- myMLEsignif(my_SE = test_NB_ZT$SE_oberved$SE_obs_all_alpha$SE_obs_beta, 
+                                        my_p_est= test_NB_ZT$p_beta_MLE)
+test_signif_C22_alpha_obs <- myMLEsignif(my_SE = test_NB_ZT$SE_oberved$SE_obs_all_alpha$SE_obs_alpha, 
+                                         my_p_est= test_NB_ZT$p_alpha_MLE)
+test_signif_C_obs <- rbind(test_signif_C12_beta_obs, test_signif_C22_alpha_obs)
+rownames(test_signif_C_obs)[nrow(test_signif_C_obs)] <- "alpha"
+colnames(test_signif_C_obs) <- paste0(colnames(test_signif_C_obs),"_obs")
+
+## -- assemble
+tab_signif_C_ZT <- cbind(tab_signif_C, test_signif_C_obs[,-1])
+
+## -- expected, theta param
+test_signif_C11_beta_exp_dp <- myMLEsignif(my_SE = test_NB_ZT$SE_expected$SE_expected_all_theta$SE_expected_beta, 
+                                           my_p_est= test_NB_ZT$p_beta_MLE)
+test_signif_C21_theta_exp_dp <- myMLEsignif(my_SE = test_NB_ZT$SE_expected$SE_expected_all_theta$SE_expected_theta, 
+                                            my_p_est= 1/test_NB_ZT$p_alpha_MLE)
+tab_signif_C_dp <- rbind(test_signif_C11_beta_exp_dp, test_signif_C21_theta_exp_dp)
+rownames(tab_signif_C_dp)[nrow(tab_signif_C_dp)] <- "theta"
+
+## -- observed, theta param
+test_signif_C12_beta_obs_dp <- myMLEsignif(my_SE = test_NB_ZT$SE_oberved$SE_obs_all_theta$SE_obs_beta, 
+                                           my_p_est= test_NB_ZT$p_beta_MLE)
+
+test_signif_C22_theta_obs_dp <- myMLEsignif(my_SE = test_NB_ZT$SE_oberved$SE_obs_all_theta$SE_obs_theta, 
+                                            my_p_est= 1/test_NB_ZT$p_alpha_MLE)
+tab_signif_C_obs_dp <- rbind(test_signif_C12_beta_obs_dp , test_signif_C22_theta_obs_dp )
+rownames(tab_signif_C_obs_dp)[nrow(tab_signif_C_obs_dp)] <- "theta"
+colnames(tab_signif_C_obs_dp) <- paste0(colnames(tab_signif_C_obs_dp),"_obs")
+
+## -- assemble
+tab_signif_C_dp_ZT <- cbind(tab_signif_C_dp, tab_signif_C_obs_dp[,-1])
+
+
+
 ## c) Compare with pre-built                                 ####
 ## --- GAMLSS                                  ####
 
@@ -1618,45 +1783,3 @@ library(kableExtra)
 kbl(myTab4viz_ZT, format = "latex")
 
 
-##                                                           ####
-##                                                           ####
-## Run test - medpar data                                    ####
-## -- data test medpar Hilbe                                 ####
-
-## Notice: a version of the example in STATA here https://www.stata.com/manuals13/rtnbreg.pdf
-
-library(COUNT)
-data(medpar)
-data_medpar <- medpar[,c("los", "died", "hmo", "type2", "type3")]
-myData <- data_medpar
-
-## -- data test UCLA                                         ####
-# same example using VGAM https://stats.oarc.ucla.edu/r/dae/zero-truncated-negative-binomial/
-
-
-## -- Set arguments                                          ####
-target_feat = "los"
-
-## zero truncation, no offset
-offset_feat = NA
-rate_param = FALSE
-zerotrunc = TRUE
-
-
-## -- Run own                                                ####
-test_NB_ZT_medpar <- NegBReg_altern(myData = myData, 
-                                    target_feat =  target_feat,
-                                    rate_param = rate_param, 
-                                    offset_feat = offset_feat,
-                                    zerotrunc = zerotrunc
-)
-
-## -- ###
-library(gamlss.tr)
-gen.trun(0, "NBI", type="left", name = "lefttr")
-obj_NB_gam_ZT_medpar <- gamlss(los ~.,
-                               data = myData,
-                               family = "NBIlefttr") 
-
-obj_NB_gam_ZT_medpar$mu.coefficients
-alpha_gamlss_ZT_medpar <- 1/exp(obj_NB_gam_ZT_medpar$sigma.coefficients)
